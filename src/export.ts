@@ -43,6 +43,8 @@ export function renderPNG(viewer: Viewer, figure: Figure, opts: ExportOptions): 
   const gridVis = viewer.grid.visible;
   const groundVis = viewer.ground.visible;
   const balVis = viewer.balanceGroup.visible;
+  const handlesVis = viewer.handles.visible;
+  viewer.handles.visible = false;
   viewer.grid.visible = opts.grid;
   viewer.ground.visible = opts.shadow;
   viewer.balanceGroup.visible = false;
@@ -84,6 +86,7 @@ export function renderPNG(viewer: Viewer, figure: Figure, opts: ExportOptions): 
   viewer.grid.visible = gridVis;
   viewer.ground.visible = groundVis;
   viewer.balanceGroup.visible = balVis;
+  viewer.handles.visible = handlesVis;
   figure.setHighlight(hl);
   viewer.invalidate();
 

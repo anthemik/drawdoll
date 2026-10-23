@@ -605,8 +605,9 @@ export class Figure {
     const s = sgn(side);
     const S = (n: string) => `${n}_${side}`;
     const hip = this.bone(S('hip'), root, s * P.hipJointHalf, hy, 0);
-    const knee = this.bone(S('knee'), hip, 0, -P.thigh, 0.003 * H);
-    const ankle = this.bone(S('ankle'), knee, 0, -P.shank, -0.006 * H);
+    // Joints sit exactly on each bone's axis so the leg IK solves without residual error.
+    const knee = this.bone(S('knee'), hip, 0, -P.thigh, 0);
+    const ankle = this.bone(S('ankle'), knee, 0, -P.shank, 0);
     const a = P.ankleY;
     const fl = P.footL;
     const fw = P.footW;

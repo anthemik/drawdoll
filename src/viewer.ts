@@ -30,6 +30,8 @@ export class Viewer {
   readonly ground: THREE.Mesh;
   readonly grid: THREE.GridHelper;
   readonly balanceGroup = new THREE.Group();
+  /** Drag handles on hands, feet and hips; drawn on top and kept a constant size on screen. */
+  readonly handles = new THREE.Group();
   readonly overlay: HTMLCanvasElement;
   readonly frameEl: HTMLDivElement;
 
@@ -76,6 +78,7 @@ export class Viewer {
     this.grid.position.y = 0.0005;
     this.scene.add(this.grid);
     this.scene.add(this.balanceGroup);
+    this.scene.add(this.handles);
     this.scene.add(figure.group);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -240,6 +243,10 @@ export class Viewer {
     const dpr = size.y / this.container.clientHeight;
     this.figure.outlineMat.uniforms.uResolution.value.copy(size);
     this.figure.outlineMat.uniforms.uThickness.value = (this.lineWeight * this.rect.h * dpr) / 1000;
+    const pxToWorld = (2 * Math.tan((this.camera.fov * DEG) / 2)) / this.container.clientHeight;
+    for (const m of this.handles.children) {
+      m.scale.setScalar(this.camera.position.distanceTo(m.position) * pxToWorld * (m.userData.radiusPx ?? 10));
+    }
     this.renderer.render(this.scene, this.camera);
     this.drawOverlay();
     this.onRender?.();
@@ -265,6 +272,33 @@ export class Viewer {
     g.fillStyle = 'rgba(255,80,60,0.95)';
     g.font = `${11 * dpr}px system-ui, sans-serif`;
     g.fillText('HORIZON', (this.rect.x + 6) * dpr, py - 5 * dpr);
+  }
+
+  /** The handle nearest a client position, within `maxPx` screen pixels. */
+  handleAt(clientX: number, clientY: number, maxPx: number): THREE.Object3D | null {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    let best: THREE.Object3D | null = null;
+    let bestD = maxPx;
+    for (const m of this.handles.children) {
+      if (!m.visible) continue;
+      const p = m.position.clone().project(this.camera);
+      if (p.z > 1) continue;
+      const d = Math.hypot(r.left + ((p.x + 1) / 2) * r.width - clientX, r.top + ((1 - p.y) / 2) * r.height - clientY);
+      if (d < bestD) {
+        bestD = d;
+        best = m;
+      }
+    }
+    return best;
+  }
+
+  /** World-space ray through a client position. */
+  rayAt(clientX: number, clientY: number): THREE.Ray {
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, this.camera);
+    return ray.ray;
   }
 
   /** Raycast the doll at a client position, returning the control id hit. */

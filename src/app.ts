@@ -1,18 +1,21 @@
 import * as THREE from 'three';
-import { Figure, RenderStyle } from './figure';
+import { Figure, RenderStyle, Side } from './figure';
 import { DEFAULT_PARAMS, FigureParams, computeProportions, describeHeight } from './proportions';
 import {
   CONTROLS,
   CONTROL_BY_ID,
   ControlDef,
   Dof,
+  Limb,
+  PIN_KEYS,
   Pose,
-  applyPose,
   clampReachAxis,
   completePose,
   defaultPose,
   mirrorPose,
+  pinKey,
 } from './joints';
+import { applyPose, getSwivel, lookAt, makePin, setSwivel } from './ik';
 import { SwingPad } from './pad';
 import { FrameSize, Viewer } from './viewer';
 import { Background, ExportOptions, exportSize, fileName, renderPNG } from './export';
@@ -70,6 +73,7 @@ interface Settings {
   horizon: boolean;
   balance: boolean;
   autoGround: boolean;
+  handles: boolean;
   exp: ExportOptions;
   camera?: { pos: number[]; target: number[] };
   saved: { name: string; pose: Pose }[];
@@ -93,6 +97,7 @@ function defaults(): Settings {
     horizon: false,
     balance: false,
     autoGround: true,
+    handles: true,
     exp: { background: 'transparent', horizon: false, shadow: true, grid: false },
     saved: [],
   };
@@ -120,6 +125,42 @@ function load(): Settings {
 type Snapshot = string;
 type Tab = 'pose' | 'figure' | 'camera' | 'look';
 
+/** Draggable points: hands and feet move their limb by IK, hips move the whole body. */
+const HANDLES: { id: string; control: string; limb?: Limb; side?: Side }[] = [
+  { id: 'hips', control: 'body' },
+  { id: 'hand_L', control: 'hand_L', limb: 'arm', side: 'L' },
+  { id: 'hand_R', control: 'hand_R', limb: 'arm', side: 'R' },
+  { id: 'foot_L', control: 'foot_L', limb: 'leg', side: 'L' },
+  { id: 'foot_R', control: 'foot_R', limb: 'leg', side: 'R' },
+];
+const LIMB_OF: Record<string, [Limb, Side]> = {
+  arm_L: ['arm', 'L'], forearm_L: ['arm', 'L'], hand_L: ['arm', 'L'],
+  arm_R: ['arm', 'R'], forearm_R: ['arm', 'R'], hand_R: ['arm', 'R'],
+  thigh_L: ['leg', 'L'], shin_L: ['leg', 'L'], foot_L: ['leg', 'L'],
+  thigh_R: ['leg', 'R'], shin_R: ['leg', 'R'], foot_R: ['leg', 'R'],
+};
+/** Dofs a pin controls; their sliders are locked while the hand/foot is pinned. */
+const PINNED_DOFS: Record<string, string[]> = {
+  arm: ['fwd', 'out', 'twist'],
+  forearm: ['bend'],
+  thigh: ['fwd', 'out', 'twist'],
+  shin: ['bend'],
+  foot: ['point', 'roll'],
+};
+
+interface Drag {
+  handle: (typeof HANDLES)[number];
+  pointerId: number;
+  plane: THREE.Plane;
+  offset: THREE.Vector3;
+  startX: number;
+  startY: number;
+  moved: boolean;
+  /** Pins that exist only for the duration of the drag. */
+  tempPins: string[];
+  rootWasFixed: boolean;
+}
+
 export class App {
   s: Settings = load();
   figure = new Figure();
@@ -135,6 +176,8 @@ export class App {
   private redoBtn: HTMLButtonElement;
   private rebuildQueued = false;
   private saveTimer = 0;
+  private lastH = 0;
+  private drag: Drag | null = null;
 
   constructor(root: HTMLElement) {
     const viewport = h('div', { class: 'viewport' });
@@ -174,6 +217,7 @@ export class App {
 
     this.viewer = new Viewer(viewport, this.figure);
     this.viewer.onRender = () => this.positionChip();
+    this.createHandles();
     this.applySettingsToViewer();
     this.rebuild();
     if (this.s.camera) {
@@ -189,6 +233,7 @@ export class App {
     this.viewer.controls.addEventListener('end', () => this.saveSoon());
 
     this.installPicking();
+    this.installDragging(viewport);
     this.installKeys();
     this.showTab('pose');
     this.updateHistoryButtons();
@@ -269,6 +314,7 @@ export class App {
     v.showHorizon = this.s.horizon;
     v.grid.visible = this.s.grid;
     v.balanceGroup.visible = this.s.balance;
+    v.handles.visible = this.s.handles;
     this.figure.style = this.s.style;
     this.figure.setOutline(this.s.outline);
     v.updateProjection();
@@ -276,7 +322,22 @@ export class App {
 
   /** Rebuild the doll's geometry after body parameters change. */
   rebuild() {
-    this.figure.build(computeProportions(this.s.params));
+    const P = computeProportions(this.s.params);
+    // Pinned targets and a fixed hip position are in world units; scale them with the
+    // body so a pinned pose survives changing age or height.
+    if (this.lastH && P.H !== this.lastH) {
+      const k = P.H / this.lastH;
+      const pose = this.s.pose;
+      for (const key of ['root', ...PIN_KEYS]) {
+        const v = pose[key];
+        if (!v) continue;
+        v.x *= k;
+        v.y *= k;
+        v.z *= k;
+      }
+    }
+    this.lastH = P.H;
+    this.figure.build(P);
     this.figure.setGuidesVisible(this.s.guides);
     this.figure.setHighlight(this.selected);
     this.viewer.updateLight();
@@ -296,7 +357,168 @@ export class App {
   poseChanged() {
     applyPose(this.figure, this.s.pose, this.s.autoGround);
     this.updateBalance();
+    this.updateHandles();
     this.viewer.invalidate();
+  }
+
+  // ---------------------------------------------------------------- pins
+
+  isPinned(limb: Limb, side: Side) {
+    return !!this.s.pose[pinKey(limb, side)];
+  }
+
+  hasPins() {
+    return PIN_KEYS.some((k) => this.s.pose[k]);
+  }
+
+  /** Planted feet hold the hips where they are; with no feet pinned the doll stands on the floor. */
+  private syncRoot() {
+    const pose = this.s.pose;
+    const feetPinned = this.isPinned('leg', 'L') || this.isPinned('leg', 'R');
+    if (feetPinned && !pose.root.fixed) this.fixRoot();
+    if (!feetPinned) pose.root.fixed = 0;
+  }
+
+  private fixRoot() {
+    const p = this.figure.bones.pelvis.getWorldPosition(new THREE.Vector3());
+    p.y -= (this.s.pose.body.lift ?? 0) * this.figure.P.H;
+    this.s.pose.root = { x: p.x, y: p.y, z: p.z, fixed: 1 };
+  }
+
+  setPinned(limb: Limb, side: Side, on: boolean) {
+    const key = pinKey(limb, side);
+    if (on) this.s.pose[key] = makePin(this.figure, limb, side);
+    else delete this.s.pose[key];
+    this.syncRoot();
+    this.poseChanged();
+    this.commit();
+    this.renderTab();
+  }
+
+  unpinAll() {
+    for (const k of PIN_KEYS) delete this.s.pose[k];
+    this.syncRoot();
+    this.poseChanged();
+    this.commit();
+    this.renderTab();
+  }
+
+  // ---------------------------------------------------------------- handles
+
+  private createHandles() {
+    const geo = new THREE.SphereGeometry(1, 20, 14);
+    for (const hd of HANDLES) {
+      const m = new THREE.Mesh(
+        geo,
+        new THREE.MeshBasicMaterial({ color: '#4f7cff', transparent: true, opacity: 0.85, depthTest: false }),
+      );
+      m.renderOrder = 20;
+      m.userData.handle = hd;
+      m.userData.radiusPx = hd.id === 'hips' ? 11 : 9;
+      this.viewer.handles.add(m);
+    }
+  }
+
+  private updateHandles() {
+    for (const m of this.viewer.handles.children as THREE.Mesh[]) {
+      const hd = m.userData.handle as (typeof HANDLES)[number];
+      const bone = hd.id === 'hips' ? 'pelvis' : hd.limb === 'arm' ? `wrist_${hd.side}` : `ankle_${hd.side}`;
+      this.figure.bones[bone].getWorldPosition(m.position);
+      const pinned = hd.limb ? this.isPinned(hd.limb, hd.side!) : false;
+      const active = this.drag?.handle.id === hd.id;
+      (m.material as THREE.MeshBasicMaterial).color.set(active ? '#ffffff' : pinned ? '#ff8a3d' : hd.id === 'hips' ? '#2fbf71' : '#4f7cff');
+    }
+  }
+
+  /**
+   * Drag a handle across a plane facing the camera. Hands and feet get a temporary
+   * pin that follows the finger; moving the hips plants both feet first, so the
+   * knees bend to crouch or lunge instead of the whole doll sliding.
+   */
+  private installDragging(viewport: HTMLElement) {
+    viewport.addEventListener(
+      'pointerdown',
+      (e) => {
+        if (!this.s.handles || this.drag || !e.isPrimary) return;
+        const m = this.viewer.handleAt(e.clientX, e.clientY, e.pointerType === 'touch' ? 30 : 18);
+        if (!m) return;
+        e.stopPropagation();
+        e.preventDefault();
+        viewport.setPointerCapture(e.pointerId);
+        const handle = m.userData.handle as (typeof HANDLES)[number];
+        const pose = this.s.pose;
+        const normal = this.viewer.camera.getWorldDirection(new THREE.Vector3());
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, m.position);
+        const hit = this.viewer.rayAt(e.clientX, e.clientY).intersectPlane(plane, new THREE.Vector3()) ?? m.position.clone();
+        const tempPins: string[] = [];
+        const rootWasFixed = !!pose.root.fixed;
+        if (!rootWasFixed) this.fixRoot();
+        if (handle.limb) {
+          const key = pinKey(handle.limb, handle.side!);
+          if (!pose[key]) {
+            pose[key] = makePin(this.figure, handle.limb, handle.side!);
+            tempPins.push(key);
+          }
+        } else {
+          for (const side of ['L', 'R'] as Side[]) {
+            const key = pinKey('leg', side);
+            if (!pose[key]) {
+              pose[key] = makePin(this.figure, 'leg', side);
+              tempPins.push(key);
+            }
+          }
+        }
+        this.drag = {
+          handle,
+          pointerId: e.pointerId,
+          plane,
+          offset: m.position.clone().sub(hit),
+          startX: e.clientX,
+          startY: e.clientY,
+          moved: false,
+          tempPins,
+          rootWasFixed,
+        };
+        this.updateHandles();
+        this.viewer.invalidate();
+      },
+      { capture: true },
+    );
+    viewport.addEventListener('pointermove', (e) => {
+      const d = this.drag;
+      if (!d || e.pointerId !== d.pointerId) return;
+      if (!d.moved && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 4) return;
+      d.moved = true;
+      const hit = this.viewer.rayAt(e.clientX, e.clientY).intersectPlane(d.plane, new THREE.Vector3());
+      if (!hit) return;
+      const target = hit.add(d.offset);
+      const pose = this.s.pose;
+      if (d.handle.limb) {
+        Object.assign(pose[pinKey(d.handle.limb, d.handle.side!)], { x: target.x, y: target.y, z: target.z });
+      } else {
+        target.y -= (pose.body.lift ?? 0) * this.figure.P.H;
+        Object.assign(pose.root, { x: target.x, y: target.y, z: target.z });
+      }
+      this.poseChanged();
+    });
+    const end = (e: PointerEvent) => {
+      const d = this.drag;
+      if (!d || e.pointerId !== d.pointerId) return;
+      this.drag = null;
+      const pose = this.s.pose;
+      for (const key of d.tempPins) delete pose[key];
+      if (!d.rootWasFixed) pose.root.fixed = 0;
+      this.syncRoot();
+      this.poseChanged();
+      if (d.moved) {
+        this.commit();
+        if (this.tab === 'pose') this.renderTab();
+      } else {
+        this.select(d.handle.control);
+      }
+    };
+    viewport.addEventListener('pointerup', end);
+    viewport.addEventListener('pointercancel', end);
   }
 
   // ---------------------------------------------------------------- actions
@@ -484,6 +706,9 @@ export class App {
     } else {
       const c = CONTROL_BY_ID[id];
       const values = this.s.pose[id];
+      const limbOf = LIMB_OF[id];
+      const pinned = limbOf ? this.isPinned(limbOf[0], limbOf[1]) : false;
+      const locked = (dofId: string) => pinned && (PINNED_DOFS[c.base] ?? []).includes(dofId);
       const header = h(
         'div',
         { class: 'part-actions' },
@@ -515,6 +740,10 @@ export class App {
           : null,
       );
       out.push(header);
+      out.push(...this.ikControls(c, pinned));
+      if (pinned && c.base !== 'hand' && c.base !== 'foot') {
+        out.push(h('p', { class: 'hint' }, `This limb is pinned. Drag its ${limbOf[0] === 'arm' ? 'hand' : 'foot'} to move it, or unpin it to use these sliders.`));
+      }
 
       const sliders = new Map<string, ReturnType<typeof slider>>();
       let pad: SwingPad | null = null;
@@ -530,7 +759,7 @@ export class App {
         out.push(
           h(
             'div',
-            { class: 'pad-wrap' },
+            { class: locked('fwd') ? 'pad-wrap disabled' : 'pad-wrap' },
             pad.el,
             h('p', { class: 'pad-caption' }, 'Drag to aim the limb. Centre = hanging down · rim = straight up.'),
           ),
@@ -549,6 +778,7 @@ export class App {
           lo: dof.lo,
           hi: dof.hi,
           format: this.formatDof(dof),
+          disabled: locked(dof.id),
           onInput: (v) => {
             if (c.pad && (dof.id === 'fwd' || dof.id === 'out')) {
               const nf = dof.id === 'fwd' ? v : values.fwd;
@@ -617,6 +847,67 @@ export class App {
       ),
     );
     return out;
+  }
+
+  /** Pin toggle and elbow/knee direction for hands and feet; quick actions for body and head. */
+  private ikControls(c: ControlDef, pinned: boolean): Node[] {
+    if (c.base === 'hand' || c.base === 'foot') {
+      const limb: Limb = c.base === 'hand' ? 'arm' : 'leg';
+      const side = c.side!;
+      const swivel = slider({
+        label: limb === 'arm' ? 'Elbow points' : 'Knee points',
+        min: -120,
+        max: 120,
+        value: Math.round(getSwivel(this.figure, limb, side)),
+        lo: 'Inward',
+        hi: 'Outward',
+        onInput: (v) => {
+          setSwivel(this.figure, this.s.pose, limb, side, v, this.s.autoGround);
+          this.poseChanged();
+        },
+        onCommit: () => this.commit(),
+      });
+      return [
+        toggle(
+          limb === 'arm' ? 'Pin hand in place' : 'Pin foot in place',
+          pinned,
+          (on) => this.setPinned(limb, side, on),
+        ),
+        swivel.el,
+        h(
+          'p',
+          { class: 'hint' },
+          limb === 'arm'
+            ? 'Drag the blue dot on the wrist to place the hand. A pinned hand stays put while you move the body.'
+            : 'Drag the blue dot on the ankle to place the foot. Pinned feet stay planted when you lean, twist or move the hips.',
+        ),
+      ];
+    }
+    if (c.id === 'body') {
+      const nodes: Node[] = [
+        h('p', { class: 'hint' }, 'Drag the green dot on the hips to crouch, lunge or shift weight: the feet stay planted and the knees bend.'),
+      ];
+      if (this.hasPins()) nodes.push(h('button', { class: 'wide', onclick: () => this.unpinAll() }, 'Unpin all hands and feet'));
+      return nodes;
+    }
+    if (c.id === 'head') {
+      return [
+        h(
+          'button',
+          {
+            class: 'wide',
+            onclick: () => {
+              lookAt(this.figure, this.s.pose, this.viewer.camera.position);
+              this.poseChanged();
+              this.commit();
+              this.renderTab();
+            },
+          },
+          'Look at camera',
+        ),
+      ];
+    }
+    return [];
   }
 
   private figureTab(): Node[] {
@@ -848,6 +1139,12 @@ export class App {
           this.s.balance = b;
           v.balanceGroup.visible = b;
           this.updateBalance();
+          v.invalidate();
+          this.saveSoon();
+        }),
+        toggle('Drag handles on hands, feet and hips', this.s.handles, (b) => {
+          this.s.handles = b;
+          v.handles.visible = b;
           v.invalidate();
           this.saveSoon();
         }),

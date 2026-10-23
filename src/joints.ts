@@ -121,7 +121,7 @@ const SIDED: Omit<ControlDef, 'id'>[] = [
     base: 'foot',
     label: 'Foot',
     dofs: [
-      d('point', 'Point', -25, 50, 'Toes up', 'Point'),
+      d('point', 'Point', -35, 50, 'Toes up', 'Point'),
       d('roll', 'Roll', -20, 35, 'Out', 'In'),
       d('toes', 'Toes', -60, 40, 'Up', 'Curl'),
     ],
@@ -144,8 +144,17 @@ const MIRROR_NEGATE: Record<string, string[]> = {
   head: ['tilt', 'turn'],
 };
 
+// Besides the per-control dofs, a pose carries:
+//  - `root`: where the hips are in the world. While `fixed` is 0 the doll stands on
+//    the floor and only x/z are used; feet pinned in place fix the hips too.
+//  - `pin_arm_L`, `pin_leg_R`, …: a hand or foot held at a world position (x, y, z)
+//    and, for feet, orientation (qx, qy, qz, qw). The limb is solved to reach it.
+export type Limb = 'arm' | 'leg';
+export const pinKey = (limb: Limb, side: Side) => `pin_${limb}_${side}`;
+export const PIN_KEYS = (['arm', 'leg'] as Limb[]).flatMap((l) => SIDES.map((s) => pinKey(l, s)));
+
 export function defaultPose(): Pose {
-  const pose: Pose = {};
+  const pose: Pose = { root: { x: 0, y: 0, z: 0, fixed: 0 } };
   for (const c of CONTROLS) pose[c.id] = Object.fromEntries(c.dofs.map((dof) => [dof.id, dof.def]));
   return pose;
 }
@@ -153,7 +162,10 @@ export function defaultPose(): Pose {
 /** Fill in any dofs missing from a partial pose (presets, saved poses). */
 export function completePose(partial: Pose): Pose {
   const pose = defaultPose();
-  for (const id in partial) if (pose[id]) Object.assign(pose[id], partial[id]);
+  for (const id in partial) {
+    if (pose[id]) Object.assign(pose[id], partial[id]);
+    else if (PIN_KEYS.includes(id)) pose[id] = { ...partial[id] };
+  }
   return pose;
 }
 
@@ -167,6 +179,15 @@ export function mirrorPose(pose: Pose): Pose {
       out[c.id] = { ...pose[c.id] };
       for (const k of MIRROR_NEGATE[c.id] ?? []) out[c.id][k] = -out[c.id][k];
     }
+  }
+  if (pose.root) out.root = { ...pose.root, x: -pose.root.x };
+  // Reflecting through the YZ plane flips x, and flips a rotation's y and z axis components.
+  for (const key of PIN_KEYS) {
+    const pin = pose[key];
+    if (!pin) continue;
+    const other = key.endsWith('_L') ? key.replace(/_L$/, '_R') : key.replace(/_R$/, '_L');
+    out[other] = { ...pin, x: -pin.x };
+    if (pin.qw !== undefined) Object.assign(out[other], { qy: -pin.qy, qz: -pin.qz });
   }
   return out;
 }
@@ -228,7 +249,7 @@ export function clampReachAxis(kind: PadKind, fwd: number, out: number, axis: 'f
 const X = new THREE.Vector3(1, 0, 0);
 const Y = new THREE.Vector3(0, 1, 0);
 const Z = new THREE.Vector3(0, 0, 1);
-const rot = (axis: THREE.Vector3, deg: number) => new THREE.Quaternion().setFromAxisAngle(axis, deg * DEG);
+export const rot = (axis: THREE.Vector3, deg: number) => new THREE.Quaternion().setFromAxisAngle(axis, deg * DEG);
 /** Intrinsic yaw (Y), then pitch (X), then roll (Z). */
 const ypr = (yaw: number, pitch: number, roll: number) => rot(Y, yaw).multiply(rot(X, pitch)).multiply(rot(Z, roll));
 
@@ -236,7 +257,7 @@ const ypr = (yaw: number, pitch: number, roll: number) => rot(Y, yaw).multiply(r
  * Point a limb that hangs along -Y in a direction given as pad coordinates:
  * the swing is the shortest arc from straight down, then twist about the bone.
  */
-function swingTwist(fwd: number, out: number, twist: number, s: number): THREE.Quaternion {
+export function swingTwist(fwd: number, out: number, twist: number, s: number): THREE.Quaternion {
   const e = Math.hypot(fwd, out);
   const phi = Math.atan2(out, fwd);
   const h = new THREE.Vector3(s * Math.sin(phi), 0, Math.cos(phi));
@@ -249,7 +270,8 @@ function setBone(fig: Figure, name: string, q: THREE.Quaternion) {
   if (b) b.quaternion.copy(fig.rest[name]).multiply(q);
 }
 
-export function applyPose(fig: Figure, pose: Pose, autoGround: boolean) {
+/** Set every bone from the pose's dof values (forward kinematics) and place the hips. */
+export function applyFK(fig: Figure, pose: Pose, autoGround: boolean) {
   const get = (id: string) => pose[id] ?? {};
   const body = get('body');
   setBone(fig, 'pelvis', ypr(-(body.turn ?? 0), body.lean ?? 0, body.tilt ?? 0));
@@ -319,10 +341,13 @@ export function applyPose(fig: Figure, pose: Pose, autoGround: boolean) {
   }
 
   const root = fig.bones.pelvis;
-  root.position.y = fig.P.rootY;
-  fig.group.updateMatrixWorld(true);
-  if (autoGround) {
-    root.position.y -= fig.lowestPoint();
+  const R = pose.root ?? { x: 0, y: 0, z: 0, fixed: 0 };
+  if (R.fixed) {
+    root.position.set(R.x, R.y, R.z);
+  } else {
+    root.position.set(R.x, fig.P.rootY, R.z);
+    fig.group.updateMatrixWorld(true);
+    if (autoGround) root.position.y -= fig.lowestPoint();
   }
   root.position.y += (body.lift ?? 0) * fig.P.H;
   fig.group.updateMatrixWorld(true);

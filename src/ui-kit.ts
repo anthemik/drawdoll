@@ -30,6 +30,7 @@ export interface SliderOpts {
   format?: (v: number) => string;
   onInput: (v: number) => void;
   onCommit?: (v: number) => void;
+  disabled?: boolean;
 }
 
 export interface Slider {
@@ -40,7 +41,7 @@ export interface Slider {
 /** Labelled range slider. Tapping the value readout resets it to its default. */
 export function slider(o: SliderOpts): Slider {
   const fmt = o.format ?? ((v: number) => `${Math.round(v)}°`);
-  const input = h('input', { type: 'range', min: o.min, max: o.max, step: o.step ?? 1, value: o.value });
+  const input = h('input', { type: 'range', min: o.min, max: o.max, step: o.step ?? 1, value: o.value, disabled: o.disabled });
   const readout = h('button', { class: 'readout', title: o.def !== undefined ? 'Tap to reset' : undefined }, fmt(o.value));
   const fill = () => {
     const t = ((Number(input.value) - o.min) / (o.max - o.min)) * 100;
@@ -54,7 +55,7 @@ export function slider(o: SliderOpts): Slider {
   });
   input.addEventListener('change', () => o.onCommit?.(Number(input.value)));
   readout.addEventListener('click', () => {
-    if (o.def === undefined) return;
+    if (o.def === undefined || o.disabled) return;
     input.value = String(o.def);
     readout.textContent = fmt(o.def);
     fill();
@@ -64,7 +65,7 @@ export function slider(o: SliderOpts): Slider {
   fill();
   const el = h(
     'div',
-    { class: 'slider' },
+    { class: o.disabled ? 'slider disabled' : 'slider' },
     h('div', { class: 'slider-head' }, h('span', { class: 'slider-label' }, o.label), readout),
     input,
     o.lo || o.hi ? h('div', { class: 'slider-ends' }, h('span', {}, o.lo ?? ''), h('span', {}, o.hi ?? '')) : null,

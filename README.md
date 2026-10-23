@@ -25,6 +25,11 @@ Safari and choose Share → Add to Home Screen; it then runs full screen and wor
 - **Pose:** tap a body part, then use its sliders. Shoulders and hips have a direction pad: drag the dot
   to aim the limb (centre = hanging down, rim = straight up); the shaded area is the joint's real range.
   The collarbone follows the arm automatically.
+- **Drag to pose:** drag the blue dots on the wrists and ankles to place hands and feet; the arm or
+  leg follows within its joint limits. Drag the green dot on the hips to crouch, lunge or shift
+  weight — the feet stay planted. In a hand or foot panel you can pin it in place (it holds its
+  world position while you move the rest of the body) and set which way the elbow or knee points.
+  The head panel has **Look at camera**.
 - **Body:** age 2 → adult, sex (female ↔ neutral ↔ male), height, build, muscle.
 - **Camera:** lens in mm (35 mm equivalent), preset views, canvas size. The bright frame in the
   viewport is exactly what exports.
@@ -39,6 +44,7 @@ Safari and choose Share → Add to Home Screen; it then runs full screen and wor
 | `src/figure.ts` | Builds the skeleton and mannequin meshes, materials, outlines, balance model |
 | `src/loft.ts` | Sweeps cross-sections into smooth body-part meshes |
 | `src/joints.ts` | Pose controls, joint ranges, ball-joint reach maps, applying a pose to the bones |
+| `src/ik.ts` | Two-bone IK for arms and legs, pins, elbow/knee direction, look-at |
 | `src/pad.ts` | The direction pad for shoulders and hips |
 | `src/viewer.ts` | Scene, camera/lens maths, export frame, lights, picking |
 | `src/export.ts` | Full-resolution PNG render |
