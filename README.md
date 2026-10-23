@@ -14,6 +14,12 @@ Open http://localhost:5173 on this Mac. To use it on an iPad on the same Wi-Fi, 
 `http://<this Mac's IP>:5173` in Safari. Over plain http the export sheet offers **Download** and
 drag-and-drop of the preview; **Share** and **Copy** appear when the app is served over HTTPS.
 
+## Deploy
+
+Every push to `main` builds the app and publishes it to GitHub Pages
+(`.github/workflows/deploy.yml`) at https://anthemik.github.io/drawdoll/. On iPad, open that in
+Safari and choose Share → Add to Home Screen; it then runs full screen and works offline.
+
 ## Using it
 
 - **Pose:** tap a body part, then use its sliders. Shoulders and hips have a direction pad: drag the dot
