@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Figure, Side, sgn } from './figure';
-import { CONTROL_BY_ID, Limb, PIN_KEYS, Pose, applyFK, clampReach, pinKey, rot, swingTwist } from './joints';
+import { CONTROL_BY_ID, Limb, PIN_KEYS, Pose, applyFK, clampReach, pinKey, rot, supportFilter, swingTwist } from './joints';
 import { DEG, clamp } from './math';
 
 // Two-bone inverse kinematics for arms and legs. The solver never moves bones
@@ -170,8 +170,11 @@ function solveLimb(fig: Figure, pose: Pose, limb: Limb, side: Side, target: THRE
   pose[n.lower].bend = clamp(best.bend, bendDof.min, bendDof.max);
 }
 
-/** Set the ankle so the foot keeps a world orientation, given the leg dofs already in the pose. */
-function orientFoot(fig: Figure, pose: Pose, side: Side, footQuat: THREE.Quaternion) {
+/**
+ * Set the ankle so the foot keeps a world orientation, given the leg dofs already in
+ * the pose. Returns the ankle angle that would need (before limits), in degrees.
+ */
+function orientFoot(fig: Figure, pose: Pose, side: Side, footQuat: THREE.Quaternion): number {
   const s = sgn(side);
   const th = pose[`thigh_${side}`];
   const shin = worldQuat(fig.bones.pelvis)
@@ -186,6 +189,7 @@ function orientFoot(fig: Figure, pose: Pose, side: Side, footQuat: THREE.Quatern
   };
   pose[`foot_${side}`].point = lim('point', e.x / DEG);
   pose[`foot_${side}`].roll = lim('roll', (-s * e.z) / DEG);
+  return e.x / DEG;
 }
 
 function parsePin(key: string): [Limb, Side] {
@@ -194,25 +198,199 @@ function parsePin(key: string): [Limb, Side] {
 }
 
 /** Solve one pinned or dragged hand/foot toward its stored target. */
-function solvePin(fig: Figure, pose: Pose, key: string) {
+function solvePin(fig: Figure, pose: Pose, key: string, floor = false) {
   const [limb, side] = parsePin(key);
   const pin = pose[key];
   const target = new THREE.Vector3(pin.x, pin.y, pin.z);
-  const pole = pin.swivel !== undefined ? poleFromSwivel(fig, limb, side, target, pin.swivel) : currentPole(fig, limb, side);
-  solveLimb(fig, pose, limb, side, target, pole);
-  if (limb === 'leg' && pin.qw !== undefined) orientFoot(fig, pose, side, new THREE.Quaternion(pin.qx, pin.qy, pin.qz, pin.qw));
+  let pole: THREE.Vector3 | null;
+  if (pin.swivel !== undefined) pole = poleFromSwivel(fig, limb, side, target, pin.swivel);
+  else if (pin.px !== undefined) {
+    // An elbow/knee being dragged: bend toward the dragged point.
+    pole = new THREE.Vector3(pin.px, pin.py, pin.pz).sub(worldPos(fig.bones[limbNames(limb, side).root]));
+  } else pole = currentPole(fig, limb, side);
+  if (limb === 'leg' && pin.qw !== undefined) {
+    const q = new THREE.Quaternion(pin.qx, pin.qy, pin.qz, pin.qw);
+    const planted = floor && pin.y <= fig.P.ankleY + 0.01 * fig.P.H;
+    if (planted) plantFoot(fig, pose, side, target, q, pole);
+    else {
+      solveLimb(fig, pose, limb, side, target, pole);
+      orientFoot(fig, pose, side, q);
+    }
+  } else solveLimb(fig, pose, limb, side, target, pole);
 }
 
-/** Pose the doll: forward kinematics, then pull pinned hands and feet onto their targets. */
+/**
+ * A foot planted on the floor whose ankle can't flex far enough to stay flat
+ * (deep squat, lunge) rolls up onto the ball of the foot: the heel lifts, the
+ * ankle travels in an arc around the ball, and the toes bend back to stay down.
+ * Search for the smallest heel lift the ankle can actually achieve.
+ */
+function plantFoot(fig: Figure, pose: Pose, side: Side, ankle: THREE.Vector3, flat: THREE.Quaternion, pole: THREE.Vector3 | null) {
+  const P = fig.P;
+  const s = sgn(side);
+  const ball = new THREE.Vector3(-s * 0.06 * P.footW, -P.ankleY, 0.47 * P.footL).applyQuaternion(flat).add(ankle);
+  const axis = new THREE.Vector3(1, 0, 0).applyQuaternion(flat);
+  const pointMin = CONTROL_BY_ID[`foot_${side}`].dofs.find((d) => d.id === 'point')!.min;
+  let lift = 0;
+  for (let step = 0; step <= 12; step++) {
+    lift = step * 5;
+    const r = new THREE.Quaternion().setFromAxisAngle(axis, lift * DEG);
+    const a = ankle.clone().sub(ball).applyQuaternion(r).add(ball);
+    solveLimb(fig, pose, 'leg', side, a, pole);
+    if (orientFoot(fig, pose, side, r.multiply(flat.clone())) > pointMin + 0.5) break;
+  }
+  const toes = CONTROL_BY_ID[`foot_${side}`].dofs.find((d) => d.id === 'toes')!;
+  // Toes stay flat on the floor whether or not the heel is up.
+  pose[`foot_${side}`].toes = Math.max(toes.min, -lift);
+}
+
+/**
+ * Pose the doll: forward kinematics, then pull pinned hands and feet onto their
+ * targets. When the hips are held in place (feet planted, or mid-drag) and the
+ * floor is on, the hips are kept as low as asked but never so low that the body
+ * goes through the floor — lowering them all the way gives a seated or kneeling
+ * pose instead of sinking.
+ */
 export function applyPose(fig: Figure, pose: Pose, autoGround: boolean) {
-  applyFK(fig, pose, autoGround);
   const pins = PIN_KEYS.filter((k) => pose[k]);
-  if (pins.length === 0) return;
-  // A second pass absorbs the shoulder girdle moving as the arm's elevation changes.
-  for (let pass = 0; pass < 2; pass++) {
-    for (const key of pins) solvePin(fig, pose, key);
+  const floor = autoGround && !!pose.root?.fixed;
+  if (pins.length === 0 && !floor) {
+    applyFK(fig, pose, autoGround);
+    if (autoGround) settleFreeHands(fig, pose, autoGround);
+    return;
+  }
+  // Pinned hands are placed by the user and never push the hips up. Planted feet
+  // normally sit exactly on the floor; they only count once the legs can't reach
+  // them any more (hips pulled lower than the legs can fold).
+  const base = supportFilter(pose);
+  const pinnedHands = new Set(pins.filter((k) => k.startsWith('pin_arm')).map((k) => `hand${k.slice(-2)}`));
+  const supports = (c: string) => base(c) && !pinnedHands.has(c);
+  const tolerance = 0.004;
+
+  const solveAll = (refresh: boolean) => {
+    // Repeat to absorb the shoulder girdle moving with arm elevation.
+    for (let pass = 0; pass < 2; pass++) {
+      for (const key of pins) solvePin(fig, pose, key, autoGround);
+      applyFK(fig, pose, autoGround, false);
+    }
+    if (refresh) fig.refreshBounds();
+  };
+
+  solveAll(!floor);
+  if (floor) {
+    // Find the lowest hip height at or above the requested one where nothing sinks.
+    const wanted = pose.root.y;
+    for (let i = 0; i < 6; i++) {
+      const low = fig.lowestPoint(supports, 3) + tolerance;
+      if (Math.abs(low) < 5e-4 || (low > 0 && pose.root.y <= wanted + 1e-6)) break;
+      pose.root.y = Math.max(wanted, pose.root.y - low);
+      solveAll(false);
+    }
+    fig.refreshBounds();
+  }
+  if (autoGround) settleFreeHands(fig, pose, autoGround);
+}
+
+/** Free-hanging hands that would pass through the floor rest on it instead, bending the arm. */
+function settleFreeHands(fig: Figure, pose: Pose, autoGround: boolean) {
+  for (const side of ['L', 'R'] as Side[]) {
+    const key = pinKey('arm', side);
+    if (pose[key]) continue;
+    const low = fig.lowestPoint((c) => c === `hand_${side}` || c === `forearm_${side}`);
+    if (low > -1e-4) continue;
+    const p = endPosition(fig, 'arm', side);
+    pose[key] = { x: p.x, y: p.y - low, z: p.z };
+    solvePin(fig, pose, key);
+    delete pose[key];
     applyFK(fig, pose, autoGround);
   }
+}
+
+const dofClamp = (control: string, id: string, v: number) => {
+  const d = CONTROL_BY_ID[control].dofs.find((x) => x.id === id)!;
+  return clamp(v, d.min, d.max);
+};
+
+/**
+ * Swing the upper arm or thigh so the elbow/knee heads toward `target`. Arms keep
+ * their elbow bend; legs keep the shin's direction in the world (it hangs as the
+ * thigh lifts), so raising a knee bends it like a march step rather than a kick.
+ */
+export function aimLimb(fig: Figure, pose: Pose, limb: Limb, side: Side, target: THREE.Vector3) {
+  const n = limbNames(limb, side);
+  const s = sgn(side);
+  const shinDir = limb === 'leg' ? worldPos(fig.bones[n.end]).sub(worldPos(fig.bones[n.mid])).normalize() : null;
+  const dU = target.clone().sub(worldPos(fig.bones[n.root])).applyQuaternion(worldQuat(fig.bones[n.frame]).invert());
+  if (dU.lengthSq() < 1e-10) return;
+  dU.normalize();
+  const upper = pose[n.upper];
+  const elev = Math.acos(clamp(-dU.y, -1, 1)) / DEG;
+  const horiz = Math.hypot(dU.x, dU.z);
+  const phi = horiz > 1e-4 ? Math.atan2(s * dU.x, dU.z) : Math.atan2(upper.out, upper.fwd);
+  [upper.fwd, upper.out] = clampReach(CONTROL_BY_ID[n.upper].pad!, elev * Math.cos(phi), elev * Math.sin(phi));
+  if (shinDir) {
+    // Knee flexion turns the shin from the thigh's -Y toward its -Z.
+    const thigh = worldQuat(fig.bones[n.frame]).multiply(swingTwist(upper.fwd, upper.out, upper.twist, s));
+    const f = shinDir.applyQuaternion(thigh.invert());
+    pose[n.lower].bend = dofClamp(n.lower, 'bend', Math.atan2(-f.z, -f.y) / DEG);
+  }
+}
+
+/** Where the head and chest drag handles sit, in their bones' local space. */
+export function headHandleLocal(fig: Figure) {
+  return new THREE.Vector3(0, 0.22 * fig.P.hh, 0.04 * fig.P.hh);
+}
+export function chestHandleLocal(fig: Figure) {
+  return new THREE.Vector3(0, 0.62 * (fig.P.neckY - fig.P.chestY), 0);
+}
+
+/** Nod and tilt the head so its handle heads toward `target` (turn is left as is). */
+export function aimHead(fig: Figure, pose: Pose, target: THREE.Vector3) {
+  const P = fig.P;
+  const d = target.clone().sub(worldPos(fig.bones.neck)).applyQuaternion(worldQuat(fig.bones.chest).invert());
+  // Measure in the head's turned frame so dragging forward always nods.
+  d.applyAxisAngle(new THREE.Vector3(0, 1, 0), pose.head.turn * DEG);
+  const h = headHandleLocal(fig);
+  const restAngle = Math.atan2(P.headZ - P.neckZ + h.z, P.headY - P.neckY + h.y);
+  pose.head.nod = dofClamp('head', 'nod', (Math.atan2(d.z, d.y) - restAngle) / DEG);
+  pose.head.tilt = dofClamp('head', 'tilt', Math.atan2(-d.x, Math.hypot(d.y, d.z)) / DEG);
+}
+
+/** Bend the spine (waist then chest) so the chest handle heads toward `target`. */
+export function aimChest(fig: Figure, pose: Pose, target: THREE.Vector3) {
+  const d = target.clone().sub(worldPos(fig.bones.lumbar)).applyQuaternion(worldQuat(fig.bones.pelvis).invert());
+  d.applyAxisAngle(new THREE.Vector3(0, 1, 0), (pose.waist.twist + pose.chest.twist) * DEG);
+  const split = (total: number, id: string) => {
+    // The lower back takes a little over half; whatever one part can't take, the other does.
+    const w = dofClamp('waist', id, total * 0.55);
+    const c = dofClamp('chest', id, total - w);
+    pose.waist[id] = dofClamp('waist', id, total - c);
+    pose.chest[id] = c;
+  };
+  split(Math.atan2(d.z, d.y) / DEG, 'bend');
+  split(Math.atan2(-d.x, Math.hypot(d.y, d.z)) / DEG, 'side');
+}
+
+/**
+ * Run a spine edit while free (unpinned) arms keep pointing the same way in the
+ * world, so bending forward leaves them hanging instead of swinging up behind.
+ */
+export function withArmsSteady(fig: Figure, pose: Pose, autoGround: boolean, edit: () => void) {
+  const steady = (['L', 'R'] as Side[])
+    .filter((side) => !pose[pinKey('arm', side)])
+    .map((side) => {
+      const n = limbNames('arm', side);
+      return { side, dir: worldPos(fig.bones[n.mid]).sub(worldPos(fig.bones[n.root])) };
+    });
+  edit();
+  applyPose(fig, pose, autoGround);
+  for (const { side, dir } of steady) aimLimb(fig, pose, 'arm', side, worldPos(fig.bones[limbNames('arm', side).root]).add(dir));
+}
+
+/** The foot's orientation with toes and sole level, keeping only which way it faces. */
+export function flatFoot(q: THREE.Quaternion) {
+  const f = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+  return new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(f.x, f.z));
 }
 
 /** Store a hand's or foot's current world placement as its pin target. */

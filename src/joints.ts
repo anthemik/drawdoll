@@ -116,12 +116,12 @@ const SIDED: Omit<ControlDef, 'id'>[] = [
       d('twist', 'Twist', -40, 45, 'In', 'Out'),
     ],
   },
-  { base: 'shin', label: 'Knee', dofs: [d('bend', 'Knee', -5, 150, 'Straight', 'Bent')] },
+  { base: 'shin', label: 'Knee', dofs: [d('bend', 'Knee', -5, 160, 'Straight', 'Bent')] },
   {
     base: 'foot',
     label: 'Foot',
     dofs: [
-      d('point', 'Point', -35, 50, 'Toes up', 'Point'),
+      d('point', 'Point', -35, 60, 'Toes up', 'Point'),
       d('roll', 'Roll', -20, 35, 'Out', 'In'),
       d('toes', 'Toes', -60, 40, 'Up', 'Curl'),
     ],
@@ -270,8 +270,20 @@ function setBone(fig: Figure, name: string, q: THREE.Quaternion) {
   if (b) b.quaternion.copy(fig.rest[name]).multiply(q);
 }
 
+/**
+ * Which body parts can hold the doll up on the floor: everything except arms that
+ * are just hanging free. A hand only becomes a support once it is placed or pinned.
+ */
+export function supportFilter(pose: Pose) {
+  const free = new Set<string>();
+  for (const side of SIDES) {
+    if (!pose[pinKey('arm', side)]) for (const b of ['arm', 'forearm', 'hand']) free.add(`${b}_${side}`);
+  }
+  return (control: string) => !free.has(control);
+}
+
 /** Set every bone from the pose's dof values (forward kinematics) and place the hips. */
-export function applyFK(fig: Figure, pose: Pose, autoGround: boolean) {
+export function applyFK(fig: Figure, pose: Pose, autoGround: boolean, refreshBounds = true) {
   const get = (id: string) => pose[id] ?? {};
   const body = get('body');
   setBone(fig, 'pelvis', ypr(-(body.turn ?? 0), body.lean ?? 0, body.tilt ?? 0));
@@ -347,9 +359,9 @@ export function applyFK(fig: Figure, pose: Pose, autoGround: boolean) {
   } else {
     root.position.set(R.x, fig.P.rootY, R.z);
     fig.group.updateMatrixWorld(true);
-    if (autoGround) root.position.y -= fig.lowestPoint();
+    if (autoGround) root.position.y -= fig.lowestPoint(supportFilter(pose));
   }
   root.position.y += (body.lift ?? 0) * fig.P.H;
   fig.group.updateMatrixWorld(true);
-  fig.refreshBounds();
+  if (refreshBounds) fig.refreshBounds();
 }

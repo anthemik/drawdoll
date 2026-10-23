@@ -25,11 +25,18 @@ Safari and choose Share → Add to Home Screen; it then runs full screen and wor
 - **Pose:** tap a body part, then use its sliders. Shoulders and hips have a direction pad: drag the dot
   to aim the limb (centre = hanging down, rim = straight up); the shaded area is the joint's real range.
   The collarbone follows the arm automatically.
-- **Drag to pose:** drag the blue dots on the wrists and ankles to place hands and feet; the arm or
-  leg follows within its joint limits. Drag the green dot on the hips to crouch, lunge or shift
-  weight — the feet stay planted. In a hand or foot panel you can pin it in place (it holds its
-  world position while you move the rest of the body) and set which way the elbow or knee points.
+- **Drag to pose:** dots on the doll can be dragged directly:
+  - **Wrists and ankles (blue):** place a hand or foot; the limb follows within its joint limits.
+  - **Elbows and knees (light blue):** swing the upper arm or thigh (a lifted knee bends like a
+    march step). If the hand/foot is pinned, they steer which way the elbow/knee points instead.
+  - **Hips, chest, head (green):** move the hips to crouch, lunge or sit (feet on the floor stay
+    planted); bend the spine (free arms keep hanging); nod and tilt the head.
+  In a hand or foot panel you can pin it in place and set which way the elbow or knee points.
   The head panel has **Look at camera**.
+- **Floor:** with *Keep feet on the floor* on, nothing sinks through it. A foot brought near the
+  floor lands flat; a planted foot rolls onto its ball when the ankle runs out of flex; lowering
+  the hips all the way gives a seated or kneeling pose; free hands rest on the floor rather than
+  propping the body up.
 - **Body:** age 2 → adult, sex (female ↔ neutral ↔ male), height, build, muscle.
 - **Camera:** lens in mm (35 mm equivalent), preset views, canvas size. The bright frame in the
   viewport is exactly what exports.

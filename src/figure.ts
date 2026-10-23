@@ -219,16 +219,18 @@ export class Figure {
     const hy = P.hipY - P.rootY;
     const sY = P.shoulderY - P.chestY;
 
-    // ---- torso: one skinned surface from crotch to skull --------------------
-    this.buildTrunk();
-
     const headMesh = this.buildHead(head);
 
     // ---- arms ---------------------------------------------------------------
     for (const side of SIDES) this.buildArm(side, chest, sY);
 
     // ---- legs ---------------------------------------------------------------
+    this.hipOuter = this.hipWidth();
     for (const side of SIDES) this.buildLeg(side, root, hy);
+
+    // ---- torso: one skinned surface from crotch to skull --------------------
+    // Built last because its lower edge is also skinned to the hip bones.
+    this.buildTrunk();
 
     this.buildGuides(headMesh);
     this.buildBalanceModel();
@@ -240,11 +242,17 @@ export class Figure {
    * bones. Bending blends smoothly across each joint, so there are no rigid pieces
    * whose edges poke out of the back or form ledges at the waist.
    */
+  /** Half-width of the hips: wide enough to sheath the tops of the thighs. */
+  private hipWidth() {
+    const P = this.P;
+    return Math.max(P.hipX, P.hipJointHalf + P.thighR * 1.12);
+  }
+
   private buildTrunk() {
     const P = this.P;
     const { H } = P;
-    // Wide enough to sheath the top of the thighs, deep enough in front to carry the belly.
-    const hipX = Math.max(P.hipX, P.hipJointHalf + P.thighR * 1.12);
+    const hipX = this.hipOuter;
+    // Deep enough in front to carry the belly.
     const belly = P.waistZ * (1.05 + 0.35 * P.fat + 0.12 * P.c);
     const upperBelly = lerp(belly, P.waistZ, 0.6);
     // Heavy builds can have a waist wider than the lower ribs; never let the ribcage pinch in.
@@ -254,16 +262,23 @@ export class Figure {
     const tc = P.neckY - P.chestY;
     const waistY = P.lumbarY + (P.chestY - P.lumbarY) * 0.45;
     const nTop = P.headY - P.neckY;
-    // Shoulder line → neck: a gentle trapezius slope that meets the neck flush at the back.
-    const trapX = lerp(P.shW * 0.8, P.neckR * 1.35, 0.6);
-    const trapZo = lerp(-0.1 * P.chestZ, P.neckZ, 0.6);
+    // Trapezius: from the flat top of the shoulder it rises in a concave curve into
+    // the side of the neck (shallow near the shoulder, steep near the neck).
+    const trap = (t: number, dy: number): Ring => ({
+      y: P.shoulderY + dy * H,
+      x: lerp(P.shW * 0.84, P.neckR, t),
+      zf: lerp(P.chestZ * 0.5, P.neckR, t),
+      zb: lerp(P.chestZ * 0.8, P.neckR * 1.1, t),
+      zo: lerp(-0.12 * P.chestZ, P.neckZ, t),
+    });
 
     const rings: Ring[] = [
-      // Below the hip joints the pelvis tucks inside the tops of the thighs and curves
-      // under at the back, rather than closing off in a flat ledge.
-      { y: P.hipY - 0.05 * H, x: P.hipJointHalf * 0.7, zf: P.hipZ * 0.25, zb: P.hipZ * 0.35 },
-      { y: P.hipY - 0.038 * H, x: hipX * 0.62, zf: P.hipZ * 0.5, zb: P.hipZ * 0.66 },
-      { y: P.hipY - 0.022 * H, x: hipX * 0.9, zf: P.hipZ * 0.74, zb: P.hipZ * 0.88 },
+      // Below the hip joints the pelvis tucks inside the tops of the thighs and the
+      // buttocks round under in an arc rather than tapering to a wedge.
+      { y: P.hipY - 0.058 * H, x: P.hipJointHalf * 0.55, zf: P.hipZ * 0.2, zb: P.hipZ * 0.3 },
+      { y: P.hipY - 0.05 * H, x: hipX * 0.5, zf: P.hipZ * 0.42, zb: P.hipZ * 0.62 },
+      { y: P.hipY - 0.038 * H, x: hipX * 0.72, zf: P.hipZ * 0.6, zb: P.hipZ * 0.82 },
+      { y: P.hipY - 0.022 * H, x: hipX * 0.9, zf: P.hipZ * 0.74, zb: P.hipZ * 0.93 },
       { y: P.hipY, x: hipX, zf: P.hipZ * 0.85, zb: P.hipZ * 0.98 },
       {
         y: P.hipY + 0.05 * H,
@@ -276,31 +291,28 @@ export class Figure {
       { y: P.chestY + 0.3 * tc, x: ribX, zf: Math.max(P.chestZ, upperBelly * 0.98), zb: P.chestZ * 0.95 },
       { y: P.chestY + 0.6 * tc, x: P.chestX, zf: P.chestZ * 1.08, zb: P.chestZ },
       { y: P.chestY + 0.8 * tc, x: P.chestX * 1.02, zf: P.chestZ, zb: P.chestZ },
-      { y: P.shoulderY - 0.004 * H, x: P.shW * 0.8, zf: P.chestZ * 0.62, zb: P.chestZ * 0.85, zo: -0.1 * P.chestZ },
-      {
-        y: lerp(P.shoulderY, P.neckY + 0.015 * H, 0.6),
-        x: trapX,
-        zf: lerp(P.chestZ * 0.62, P.neckR, 0.6),
-        zb: lerp(P.chestZ * 0.85, P.neckR * 1.08, 0.6),
-        zo: trapZo,
-      },
-      { y: P.neckY + 0.015 * H, x: P.neckR * 1.12, zf: P.neckR, zb: P.neckR * 1.04, zo: P.neckZ },
+      { y: P.shoulderY - 0.01 * H, x: P.shW * 0.9, zf: P.chestZ * 0.68, zb: P.chestZ * 0.9, zo: -0.08 * P.chestZ },
+      trap(0, 0.002),
+      trap(0.4, 0.009),
+      trap(0.72, 0.018),
+      { y: P.neckY + 0.012 * H, x: P.neckR * 1.12, zf: P.neckR, zb: P.neckR * 1.06, zo: P.neckZ },
       { y: P.neckY + nTop * 0.45, x: P.neckR, zf: P.neckR * 0.95, zb: P.neckR, zo: lerp(P.neckZ, P.headZ, 0.45) },
       { y: P.headY, x: P.neckR * 0.95, zf: P.neckR * 0.9, zb: P.neckR, zo: P.headZ },
       { y: P.headY + 0.03 * H, x: P.neckR * 0.6, zf: P.neckR * 0.6, zb: P.neckR * 0.6, zo: P.headZ },
     ];
-    this.hipOuter = hipX;
     const geo = loft(rings, 64, 8);
     this.sculptChest(geo, tc, P.chestY);
     this.sculptGlutes(geo, hipX);
 
     // Skin weights: a smooth partition of unity between consecutive spine bones.
-    const bones = ['pelvis', 'lumbar', 'chest', 'neck', 'head'];
-    const boneControl = ['body', 'waist', 'chest', 'head', 'head'];
+    // The neck blend starts above the shoulder line so head turns don't drag the
+    // tops of the shoulders around.
+    const bones = ['pelvis', 'lumbar', 'chest', 'neck', 'head', 'hip_L', 'hip_R'];
+    const boneControl = ['body', 'waist', 'chest', 'head', 'head', 'body', 'body'];
     const joints: [number, number][] = [
       [P.lumbarY, 0.04 * H],
       [P.chestY, 0.04 * H],
-      [P.neckY, 0.022 * H],
+      [P.neckY + 0.012 * H, 0.016 * H],
       [P.headY, 0.015 * H],
     ];
     const pos = geo.getAttribute('position');
@@ -310,8 +322,17 @@ export class Figure {
     for (let i = 0; i < pos.count; i++) {
       const y = pos.getY(i);
       const r = joints.map(([j, w]) => smoothstep(j - w, j + w, y));
-      const w = [1 - r[0], r[0] - r[1], r[1] - r[2], r[2] - r[3], r[3]].map((v) => Math.max(0, v));
-      const order = [0, 1, 2, 3, 4].sort((a, b) => w[b] - w[a]).slice(0, 4);
+      const w = [1 - r[0], r[0] - r[1], r[1] - r[2], r[2] - r[3], r[3], 0, 0].map((v) => Math.max(0, v));
+      // Below the hip joints the skin partly follows the thighs, so the buttocks and
+      // groin roll with a bending hip instead of leaving a wedge behind it.
+      const hipW = 0.42 * smoothstep(P.hipY + 0.01 * H, P.hipY - 0.055 * H, y);
+      if (hipW > 0) {
+        const left = smoothstep(-0.3 * hipX, 0.3 * hipX, pos.getX(i));
+        w[0] *= 1 - hipW;
+        w[5] = hipW * left;
+        w[6] = hipW * (1 - left);
+      }
+      const order = [0, 1, 2, 3, 4, 5, 6].sort((a, b) => w[b] - w[a]).slice(0, 4);
       const total = order.reduce((t, k) => t + w[k], 0);
       order.forEach((k, n) => {
         skinIndex[i * 4 + n] = k;
@@ -509,20 +530,23 @@ export class Figure {
     const { H } = P;
     const s = sgn(side);
     const S = (n: string) => `${n}_${side}`;
-    const clav = this.bone(S('clav'), chest, s * 0.012 * H, sY - 0.015 * H, P.chestZ * 0.6);
-    const sh = this.bone(S('shoulder'), clav, s * (P.shW - 0.012 * H), -0.02 * H, -P.chestZ * 0.6 - 0.004 * H);
+    // The shoulder joint sits about 2% of height below the top of the shoulder (acromion).
+    const clav = this.bone(S('clav'), chest, s * 0.012 * H, sY - 0.012 * H, P.chestZ * 0.6);
+    const sh = this.bone(S('shoulder'), clav, s * (P.shW - 0.012 * H), -0.01 * H, -P.chestZ * 0.6 - 0.004 * H);
     const elbow = this.bone(S('elbow'), sh, 0, -P.ua, 0);
     const wrist = this.bone(S('wrist'), elbow, 0, -P.fa, 0);
     const r = P.armR;
     const fr = P.forearmR;
     const wr = P.wristR;
 
-    // Deltoid cap sits on the humerus but is the handle for the shoulder girdle.
-    this.part(sh, ellipsoid(r * 1.18, r * 1.3, r * 1.22, s * 0.004 * H, -0.012 * H, 0), S('shoulder'));
+    // Deltoid cap: rides on the humerus, its top level with the top of the shoulder.
+    // It is the tap target for the shoulder girdle.
+    this.part(sh, ellipsoid(r * 1.15, r * 1.28, r * 1.2, s * 0.006 * H, -0.007 * H, 0), S('shoulder'));
     this.part(
       sh,
       loft([
-        { y: 0.01 * H, x: r * 0.9, zf: r * 0.95, zb: r * 0.95 },
+        // The top end stays tucked inside the deltoid cap.
+        { y: -0.004 * H, x: r * 0.62, zf: r * 0.62, zb: r * 0.62 },
         { y: -0.15 * P.ua, x: r * 1.08, zf: r * 1.05, zb: r * 1.05 },
         { y: -0.45 * P.ua, x: r * 0.95, zf: r * (1.05 + 0.1 * P.mu), zb: r * 0.95 },
         { y: -0.8 * P.ua, x: r * 0.84, zf: r * 0.8, zb: r * 0.86 },
@@ -752,18 +776,37 @@ export class Figure {
     }
   }
 
-  /** Lowest point of the body surface in world space (for standing it on the floor). */
-  lowestPoint(): number {
+  /**
+   * Lowest point of the body surface in world space (for standing it on the floor),
+   * optionally for some controls only. Rigid parts are visited lowest-first by
+   * bounding sphere and skipped once they can't beat the current minimum.
+   */
+  lowestPoint(only?: (control: string) => boolean, stride = 2): number {
     let min = Infinity;
     const v = new THREE.Vector3();
+    const rigid: { mesh: THREE.Mesh; bottom: number }[] = [];
     for (const mesh of this.meshes) {
+      if (only && !only(mesh.userData.control)) continue;
       const pos = mesh.geometry.getAttribute('position');
-      const m = mesh.matrixWorld;
-      const skinned = mesh instanceof THREE.SkinnedMesh ? mesh : null;
-      for (let i = 0; i < pos.count; i += 2) {
-        v.fromBufferAttribute(pos, i);
-        if (skinned) skinned.applyBoneTransform(i, v);
-        v.applyMatrix4(m);
+      if (mesh instanceof THREE.SkinnedMesh) {
+        for (let i = 0; i < pos.count; i += stride) {
+          v.fromBufferAttribute(pos, i);
+          mesh.applyBoneTransform(i, v);
+          v.applyMatrix4(mesh.matrixWorld);
+          if (v.y < min) min = v.y;
+        }
+        continue;
+      }
+      if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+      const sphere = mesh.geometry.boundingSphere!;
+      rigid.push({ mesh, bottom: v.copy(sphere.center).applyMatrix4(mesh.matrixWorld).y - sphere.radius });
+    }
+    rigid.sort((a, b) => a.bottom - b.bottom);
+    for (const { mesh, bottom } of rigid) {
+      if (bottom >= min) break;
+      const pos = mesh.geometry.getAttribute('position');
+      for (let i = 0; i < pos.count; i += stride) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
         if (v.y < min) min = v.y;
       }
     }
