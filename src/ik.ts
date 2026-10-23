@@ -210,7 +210,10 @@ function solvePin(fig: Figure, pose: Pose, key: string, floor = false) {
   } else pole = currentPole(fig, limb, side);
   if (limb === 'leg' && pin.qw !== undefined) {
     const q = new THREE.Quaternion(pin.qx, pin.qy, pin.qz, pin.qw);
-    const planted = floor && pin.y <= fig.P.ankleY + 0.01 * fig.P.H;
+    // A foot is planted when it's at standing height with its sole facing down; a
+    // pointed foot resting on its top (kneeling, sitting on heels) keeps its angle.
+    const soleDown = new THREE.Vector3(0, 1, 0).applyQuaternion(q).y > 0.9;
+    const planted = floor && soleDown && pin.y <= fig.P.ankleY + 0.01 * fig.P.H;
     if (planted) plantFoot(fig, pose, side, target, q, pole);
     else {
       solveLimb(fig, pose, limb, side, target, pole);
@@ -251,11 +254,11 @@ function plantFoot(fig: Figure, pose: Pose, side: Side, ankle: THREE.Vector3, fl
  * goes through the floor — lowering them all the way gives a seated or kneeling
  * pose instead of sinking.
  */
-export function applyPose(fig: Figure, pose: Pose, autoGround: boolean) {
+export function applyPose(fig: Figure, pose: Pose, autoGround: boolean, refreshBounds = true) {
   const pins = PIN_KEYS.filter((k) => pose[k]);
   const floor = autoGround && !!pose.root?.fixed;
   if (pins.length === 0 && !floor) {
-    applyFK(fig, pose, autoGround);
+    applyFK(fig, pose, autoGround, refreshBounds);
     if (autoGround) settleFreeHands(fig, pose, autoGround);
     return;
   }
@@ -276,7 +279,7 @@ export function applyPose(fig: Figure, pose: Pose, autoGround: boolean) {
     if (refresh) fig.refreshBounds();
   };
 
-  solveAll(!floor);
+  solveAll(!floor && refreshBounds);
   if (floor) {
     // Find the lowest hip height at or above the requested one where nothing sinks.
     const wanted = pose.root.y;
@@ -286,7 +289,7 @@ export function applyPose(fig: Figure, pose: Pose, autoGround: boolean) {
       pose.root.y = Math.max(wanted, pose.root.y - low);
       solveAll(false);
     }
-    fig.refreshBounds();
+    if (refreshBounds) fig.refreshBounds();
   }
   if (autoGround) settleFreeHands(fig, pose, autoGround);
 }

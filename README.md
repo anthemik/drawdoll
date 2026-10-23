@@ -33,6 +33,11 @@ Safari and choose Share → Add to Home Screen; it then runs full screen and wor
     planted); bend the spine (free arms keep hanging); nod and tilt the head.
   In a hand or foot panel you can pin it in place and set which way the elbow or knee points.
   The head panel has **Look at camera**.
+- **Gravity** (toggle at the top of the Pose tab): when you let go of a part, the doll checks its
+  centre of mass against what it's standing, kneeling or sitting on. If it would topple, it eases
+  into a balanced pose: a whole-body tilt or lean lands back toward upright; otherwise the hips
+  shift over the feet, the trunk counter-leans, and as a last resort a foot steps. Undo once to
+  keep your exact pose. Presets load as designed.
 - **Floor:** with *Keep feet on the floor* on, nothing sinks through it. A foot brought near the
   floor lands flat; a planted foot rolls onto its ball when the ankle runs out of flex; lowering
   the hips all the way gives a seated or kneeling pose; free hands rest on the floor rather than
@@ -67,6 +72,7 @@ python3 -I tools/build_realistic.py path/to/that/folder public/realistic
 | `src/loft.ts` | Sweeps cross-sections into smooth body-part meshes |
 | `src/joints.ts` | Pose controls, joint ranges, ball-joint reach maps, applying a pose to the bones |
 | `src/ik.ts` | Two-bone IK for arms and legs, pins, elbow/knee direction, look-at |
+| `src/gravity.ts` | Centre of mass vs floor support, and finding the nearest balanced pose |
 | `src/realistic.ts` | Loads the realistic body, blends its shape targets, fits the skeleton to it |
 | `tools/build_realistic.py` | Converts MakeHuman assets into the realistic body asset |
 | `src/pad.ts` | The direction pad for shoulders and hips |

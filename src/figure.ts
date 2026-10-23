@@ -819,6 +819,9 @@ export class Figure {
         { bone: S('ankle'), p: V(-0.45 * fw - s * 0.05 * fw, -a, 0.45 * fl) },
         { bone: S('toe'), p: V(-s * 0.1 * fw, -0.28 * a, 0.28 * fl) },
         { bone: S('knee'), p: V(0, 0, P.kneeR * 1.05) },
+        // Front of the shin and top of the foot, for kneeling and sitting on the heels.
+        { bone: S('knee'), p: V(0, -0.5 * P.shank, P.calfR * 0.7) },
+        { bone: S('ankle'), p: V(0, -0.2 * a, 0.3 * fl) },
         { bone: S('f12'), p: V(0, -0.15 * P.hl, 0) },
         { bone: S('elbow'), p: V(0, 0, -P.armR * 0.8) },
       );
@@ -850,11 +853,44 @@ export class Figure {
     return { com, touching };
   }
 
+  /**
+   * Where the body touches the floor: floor-plane (x, z) positions of surface
+   * vertices within `tolerance` of y = 0. Sampled every `stride` vertices.
+   */
+  floorContacts(tolerance: number, stride = 3): THREE.Vector2[] {
+    const out: THREE.Vector2[] = [];
+    const v = new THREE.Vector3();
+    for (const mesh of this.meshes) {
+      const pos = mesh.geometry.getAttribute('position');
+      const skinned = mesh instanceof THREE.SkinnedMesh ? mesh : null;
+      if (!skinned) {
+        if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
+        const sphere = mesh.geometry.boundingSphere!;
+        if (v.copy(sphere.center).applyMatrix4(mesh.matrixWorld).y - sphere.radius > tolerance) continue;
+      }
+      for (let i = 0; i < pos.count; i += stride) {
+        v.fromBufferAttribute(pos, i);
+        if (skinned) skinned.applyBoneTransform(i, v);
+        v.applyMatrix4(mesh.matrixWorld);
+        if (v.y < tolerance) out.push(new THREE.Vector2(v.x, v.z));
+      }
+    }
+    return out;
+  }
+
   /** Skinned meshes cache their posed bounds; refresh after every pose change (picking, framing). */
   refreshBounds() {
+    // Outline hulls share their mesh's geometry and skeleton, so copy instead of recomputing.
     for (const m of this.skinned) {
+      if (m.parent instanceof THREE.SkinnedMesh && m.parent.geometry === m.geometry) continue;
       m.computeBoundingBox();
       m.computeBoundingSphere();
+      for (const c of m.children) {
+        if (c instanceof THREE.SkinnedMesh) {
+          c.boundingBox = m.boundingBox!.clone();
+          c.boundingSphere = m.boundingSphere!.clone();
+        }
+      }
     }
   }
 

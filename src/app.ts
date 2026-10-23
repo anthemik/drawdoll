@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { Figure, RenderStyle, Side } from './figure';
 import { loadRealisticAsset } from './realistic';
+import { blendPose, findBalance, measureBalance } from './gravity';
 import { DEFAULT_PARAMS, FigureParams, computeProportions, describeHeight } from './proportions';
 import {
   CONTROLS,
@@ -91,6 +92,7 @@ interface Settings {
   balance: boolean;
   autoGround: boolean;
   handles: boolean;
+  gravity: boolean;
   exp: ExportOptions;
   camera?: { pos: number[]; target: number[] };
   saved: { name: string; pose: Pose }[];
@@ -116,6 +118,7 @@ function defaults(): Settings {
     balance: false,
     autoGround: true,
     handles: true,
+    gravity: false,
     exp: { background: 'transparent', horizon: false, shadow: true, grid: false },
     saved: [],
   };
@@ -219,6 +222,10 @@ export class App {
   private lastH = 0;
   private drag: Drag | null = null;
   private bodyStatus = '';
+  /** The control the user last changed, so gravity compensates elsewhere first. */
+  private lastEdited: string | null = null;
+  private balancing = false;
+  private presetLoading = false;
 
   constructor(root: HTMLElement) {
     const viewport = h('div', { class: 'viewport' });
@@ -289,9 +296,49 @@ export class App {
 
   private last: Snapshot = '';
 
-  /** Call after a finished edit (slider released, pad lifted, preset chosen). */
+  /**
+   * Call after a finished edit (slider released, pad lifted, preset chosen). With
+   * gravity on, an edit that leaves the doll unable to balance is recorded as is
+   * (one undo brings it back), then the body eases into a balanced pose.
+   */
   commit() {
     const snap = this.snapshot();
+    if (snap === this.last) return;
+    this.record(snap);
+    if (this.s.gravity && !this.balancing && !this.presetLoading) this.land();
+  }
+
+  private land() {
+    const from = JSON.parse(JSON.stringify(this.s.pose)) as Pose;
+    const to = findBalance(this.figure, this.s.pose, this.s.autoGround, this.lastEdited);
+    if (!to) {
+      this.poseChanged();
+      return;
+    }
+    this.balancing = true;
+    const t0 = performance.now();
+    const ms = 300;
+    // A timer rather than animation frames: frames can pause (hidden or backgrounded
+    // page) and the landing must always finish.
+    const next = (fn: () => void) => setTimeout(fn, 16);
+    const frame = () => {
+      const t = Math.min(1, (performance.now() - t0) / ms);
+      const ease = 1 - (1 - t) ** 3;
+      this.s.pose = t < 1 ? blendPose(from, to, ease) : to;
+      this.poseChanged();
+      if (t < 1) {
+        // Animation frames pause in a hidden page; keep landing on a timer there.
+        next(frame);
+        return;
+      }
+      this.balancing = false;
+      this.record(this.snapshot());
+      if (this.tab === 'pose') this.renderTab();
+    };
+    next(frame);
+  }
+
+  private record(snap: Snapshot) {
     if (snap === this.last) return;
     if (this.last) this.undo.push(this.last);
     if (this.undo.length > 200) this.undo.shift();
@@ -538,6 +585,7 @@ export class App {
           // Synthetic pointers (tests) can't be captured; real ones always can.
         }
         const handle = m.userData.handle as Handle;
+        this.lastEdited = handle.control;
         const pose = this.s.pose;
         const normal = this.viewer.camera.getWorldDirection(new THREE.Vector3());
         const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, m.position);
@@ -709,9 +757,14 @@ export class App {
   }
 
   loadPose(pose: Pose) {
+    this.lastEdited = null;
+    // Presets (including mid-stride ones like Run) stay exactly as designed;
+    // gravity applies to edits made from here.
+    this.presetLoading = true;
     this.s.pose = completePose(JSON.parse(JSON.stringify(pose)));
     this.poseChanged();
     this.commit();
+    this.presetLoading = false;
     this.renderTab();
   }
 
@@ -775,10 +828,9 @@ export class App {
     g.clear();
     if (!this.s.balance) return;
     const P = this.figure.P;
-    const { com, touching } = this.figure.balance(0, 0.02 * P.H);
-    const pts = hull(touching.map((p) => new THREE.Vector2(p.x, p.z)));
-    const c2 = new THREE.Vector2(com.x, com.z);
-    const stable = insideHull(pts, c2, 0.01 * P.H);
+    const { com } = this.figure.balance(0, 0);
+    const { support: pts, outside } = measureBalance(this.figure);
+    const stable = outside < 0.01 * P.H;
     const color = stable ? '#2fbf71' : '#ff7a2f';
     if (pts.length >= 2) {
       const ring = pts.map((p) => new THREE.Vector3(p.x, 0.002, p.y));
@@ -844,7 +896,27 @@ export class App {
   }
 
   private poseTab(): Node[] {
-    const out: Node[] = [this.partPicker()];
+    const out: Node[] = [
+      toggle('Gravity: keep balance', this.s.gravity, (b) => {
+        this.s.gravity = b;
+        this.saveSoon();
+        this.renderTab();
+        if (b) {
+          this.lastEdited = null;
+          this.land();
+        }
+      }),
+    ];
+    if (this.s.gravity) {
+      out.push(
+        h(
+          'p',
+          { class: 'hint' },
+          'When you let go of a part, the body shifts its hips, leans against the fall or takes a step so it can stand. Undo once to keep your exact pose.',
+        ),
+      );
+    }
+    out.push(this.partPicker());
     const id = this.selected;
     if (!id) {
       out.push(
@@ -900,6 +972,7 @@ export class App {
       let pad: SwingPad | null = null;
       if (c.pad) {
         pad = new SwingPad(c.pad, c.side!, (fwd, outv, done) => {
+          this.lastEdited = id;
           values.fwd = fwd;
           values.out = outv;
           sliders.get('fwd')?.set(fwd);
@@ -931,6 +1004,7 @@ export class App {
           format: this.formatDof(dof),
           disabled: locked(dof.id),
           onInput: (v) => {
+            this.lastEdited = id;
             if (c.pad && (dof.id === 'fwd' || dof.id === 'out')) {
               const nf = dof.id === 'fwd' ? v : values.fwd;
               const no = dof.id === 'out' ? v : values.out;
@@ -1554,43 +1628,4 @@ export class App {
     document.body.append(dialog);
     regenerate();
   }
-}
-
-// ---------------------------------------------------------------- geometry helpers
-
-function hull(points: THREE.Vector2[]): THREE.Vector2[] {
-  const p = [...points].sort((a, b) => a.x - b.x || a.y - b.y);
-  if (p.length < 3) return p;
-  const cross = (o: THREE.Vector2, a: THREE.Vector2, b: THREE.Vector2) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower: THREE.Vector2[] = [];
-  for (const q of p) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
-    lower.push(q);
-  }
-  const upper: THREE.Vector2[] = [];
-  for (let i = p.length - 1; i >= 0; i--) {
-    const q = p[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
-    upper.push(q);
-  }
-  return lower.slice(0, -1).concat(upper.slice(0, -1));
-}
-
-function insideHull(poly: THREE.Vector2[], p: THREE.Vector2, tol: number): boolean {
-  if (poly.length === 0) return false;
-  if (poly.length < 3) {
-    const a = poly[0];
-    const b = poly[poly.length - 1];
-    const ab = b.clone().sub(a);
-    const t = ab.lengthSq() > 0 ? Math.max(0, Math.min(1, p.clone().sub(a).dot(ab) / ab.lengthSq())) : 0;
-    return a.clone().addScaledVector(ab, t).distanceTo(p) < tol;
-  }
-  for (let i = 0; i < poly.length; i++) {
-    const a = poly[i];
-    const b = poly[(i + 1) % poly.length];
-    const edge = b.clone().sub(a);
-    const cross = edge.x * (p.y - a.y) - edge.y * (p.x - a.x);
-    if (cross < -tol * edge.length()) return false;
-  }
-  return true;
 }
