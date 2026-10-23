@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Figure, RenderStyle, Side } from './figure';
+import { loadRealisticAsset } from './realistic';
 import { DEFAULT_PARAMS, FigureParams, computeProportions, describeHeight } from './proportions';
 import {
   CONTROLS,
@@ -69,8 +70,11 @@ const AGES: { label: string; age: number }[] = [
   { label: 'Adult', age: 25 },
 ];
 
+type BodyStyle = 'mannequin' | 'realistic';
+
 interface Settings {
   params: FigureParams;
+  bodyStyle: BodyStyle;
   pose: Pose;
   focal: number;
   keepFraming: boolean;
@@ -95,6 +99,7 @@ interface Settings {
 function defaults(): Settings {
   return {
     params: { ...DEFAULT_PARAMS },
+    bodyStyle: 'mannequin',
     pose: defaultPose(),
     focal: 50,
     keepFraming: true,
@@ -213,6 +218,7 @@ export class App {
   private saveTimer = 0;
   private lastH = 0;
   private drag: Drag | null = null;
+  private bodyStatus = '';
 
   constructor(root: HTMLElement) {
     const viewport = h('div', { class: 'viewport' });
@@ -267,6 +273,7 @@ export class App {
     }
     this.viewer.controls.addEventListener('end', () => this.saveSoon());
 
+    if (this.s.bodyStyle === 'realistic') this.setBodyStyle('realistic');
     this.installPicking();
     this.installDragging(viewport);
     this.installKeys();
@@ -669,6 +676,29 @@ export class App {
     this.poseChanged();
     this.commit();
     this.renderTab();
+  }
+
+  /** Switch between the mannequin and the realistic body (loaded on first use). */
+  async setBodyStyle(style: BodyStyle) {
+    this.s.bodyStyle = style;
+    if (style === 'realistic' && !this.figure.realistic) {
+      this.bodyStatus = 'Loading realistic body…';
+      this.renderTab();
+      try {
+        this.figure.realistic = await loadRealisticAsset();
+        this.bodyStatus = '';
+      } catch {
+        this.bodyStatus = 'Couldn’t load the realistic body. Check your connection and try again.';
+        this.s.bodyStyle = 'mannequin';
+        this.renderTab();
+        return;
+      }
+      if (this.s.bodyStyle !== 'realistic') return;
+    }
+    if (style === 'mannequin') this.figure.realistic = null;
+    this.rebuild();
+    this.renderTab();
+    this.saveSoon();
   }
 
   resetBody() {
@@ -1100,6 +1130,15 @@ export class App {
     return [
       section(
         'Body',
+        segmented<BodyStyle>(
+          [
+            { value: 'mannequin', label: 'Mannequin' },
+            { value: 'realistic', label: 'Realistic' },
+          ],
+          this.s.bodyStyle,
+          (b) => this.setBodyStyle(b),
+        ),
+        this.bodyStatus ? h('p', { class: 'hint' }, this.bodyStatus) : null,
         info,
         age.el,
         ages,

@@ -227,8 +227,8 @@ function solvePin(fig: Figure, pose: Pose, key: string, floor = false) {
  */
 function plantFoot(fig: Figure, pose: Pose, side: Side, ankle: THREE.Vector3, flat: THREE.Quaternion, pole: THREE.Vector3 | null) {
   const P = fig.P;
-  const s = sgn(side);
-  const ball = new THREE.Vector3(-s * 0.06 * P.footW, -P.ankleY, 0.47 * P.footL).applyQuaternion(flat).add(ankle);
+  const toe = fig.bones[`toe_${side}`].position;
+  const ball = new THREE.Vector3(toe.x, -P.ankleY, toe.z).applyQuaternion(flat).add(ankle);
   const axis = new THREE.Vector3(1, 0, 0).applyQuaternion(flat);
   const pointMin = CONTROL_BY_ID[`foot_${side}`].dofs.find((d) => d.id === 'point')!.min;
   let lift = 0;

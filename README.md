@@ -37,11 +37,25 @@ Safari and choose Share → Add to Home Screen; it then runs full screen and wor
   floor lands flat; a planted foot rolls onto its ball when the ankle runs out of flex; lowering
   the hips all the way gives a seated or kneeling pose; free hands rest on the floor rather than
   propping the body up.
-- **Body:** age 2 → adult, sex (female ↔ neutral ↔ male), height, build, muscle.
+- **Body:** choose **Mannequin** (simple forms) or **Realistic** (a detailed human body), then
+  age 2 → adult, sex (female ↔ neutral ↔ male), height, build, muscle. Both bodies share the
+  same skeleton, so poses, presets and dragging work identically.
 - **Camera:** lens in mm (35 mm equivalent), preset views, canvas size. The bright frame in the
   viewport is exactly what exports.
 - **Look:** shaded / toon / line art, outlines, face guide lines, light direction.
 - **Export PNG:** transparent, white or gray background; optional floor shadow, grid and horizon line.
+
+## Realistic body asset
+
+`public/realistic/body.{json,bin}` is generated from MakeHuman's CC0 base mesh, skin weights and
+macro shape targets by `tools/build_realistic.py` (no Blender needed). To regenerate, download
+`makehuman/data/3dobjs/base.obj`, `rigs/default.mhskel`, `rigs/default_weights.mhw` and the
+`targets/macrodetails/*.target` files (baby/child/young) from
+https://github.com/makehumancommunity/makehuman into a folder laid out the same way, then:
+
+```bash
+python3 -I tools/build_realistic.py path/to/that/folder public/realistic
+```
 
 ## Code map
 
@@ -52,6 +66,8 @@ Safari and choose Share → Add to Home Screen; it then runs full screen and wor
 | `src/loft.ts` | Sweeps cross-sections into smooth body-part meshes |
 | `src/joints.ts` | Pose controls, joint ranges, ball-joint reach maps, applying a pose to the bones |
 | `src/ik.ts` | Two-bone IK for arms and legs, pins, elbow/knee direction, look-at |
+| `src/realistic.ts` | Loads the realistic body, blends its shape targets, fits the skeleton to it |
+| `tools/build_realistic.py` | Converts MakeHuman assets into the realistic body asset |
 | `src/pad.ts` | The direction pad for shoulders and hips |
 | `src/viewer.ts` | Scene, camera/lens maths, export frame, lights, picking |
 | `src/export.ts` | Full-resolution PNG render |

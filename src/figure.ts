@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { loft, Ring } from './loft';
 import { Proportions } from './proportions';
 import { lerp, smoothstep } from './math';
+import { RealisticAsset, eyeball, fitSkeleton, jointCentres, morph, placeMesh } from './realistic';
 
 export type Side = 'L' | 'R';
 export const SIDES: Side[] = ['L', 'R'];
@@ -9,6 +10,15 @@ export const SIDES: Side[] = ['L', 'R'];
 export const sgn = (side: Side) => (side === 'L' ? 1 : -1);
 
 export type RenderStyle = 'shaded' | 'toon' | 'lines';
+
+/** The pose control a bone's skin belongs to (for tapping and highlighting). */
+export function controlOfBone(bone: string): string {
+  const m = bone.match(/^(.*)_([LR])$/);
+  if (!m) return { pelvis: 'body', lumbar: 'waist', chest: 'chest' }[bone] ?? 'head';
+  const [, base, side] = m;
+  const map: Record<string, string> = { clav: 'shoulder', shoulder: 'arm', elbow: 'forearm', hip: 'thigh', knee: 'shin', ankle: 'foot', toe: 'foot' };
+  return `${map[base] ?? 'hand'}_${side}`;
+}
 
 const BASE_COLOR = new THREE.Color('#d9d2c9');
 const HIGHLIGHT = new THREE.Color('#4f7cff');
@@ -70,6 +80,8 @@ export class Figure {
   rest: Record<string, THREE.Quaternion> = {};
   meshes: THREE.Mesh[] = [];
   private skinned: THREE.SkinnedMesh[] = [];
+  /** When set, build the realistic MakeHuman body instead of the mannequin. */
+  realistic: RealisticAsset | null = null;
   /** Half-width of the hips, which the top of each thigh fills out to. */
   private hipOuter = 0;
   guides: THREE.Mesh[] = [];
@@ -208,6 +220,10 @@ export class Figure {
   build(P: Proportions) {
     this.clear();
     this.P = P;
+    if (this.realistic) {
+      this.buildRealistic(P, this.realistic);
+      return;
+    }
 
     // ---- skeleton -------------------------------------------------------
     const root = this.bone('pelvis', this.group, 0, P.rootY, 0);
@@ -343,8 +359,16 @@ export class Figure {
     geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(skinIndex, 4));
     geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeight, 4));
 
-    // One material group per pose control, so tapping and highlighting still work per region.
-    const controls = ['body', 'waist', 'chest', 'head'];
+    this.addSkinned(geo, bones, boneControl, dominant);
+  }
+
+  /**
+   * Add a skinned mesh bound to the named bones in their current pose. Triangles
+   * are grouped by the pose control of their dominant bone, so tapping and
+   * highlighting still work per body region on a single continuous surface.
+   */
+  private addSkinned(geo: THREE.BufferGeometry, bones: string[], boneControl: string[], dominant: ArrayLike<number>) {
+    const controls = [...new Set(boneControl)];
     const index = geo.getIndex()!.array;
     const buckets: number[][] = controls.map(() => []);
     for (let t = 0; t < index.length; t += 3) {
@@ -365,7 +389,7 @@ export class Figure {
       geo,
       controls.map((c) => this.mat(c)),
     );
-    mesh.userData.control = 'body';
+    mesh.userData.control = boneControl[0];
     mesh.userData.groupControls = controls;
     mesh.userData.vertexControl = Array.from(dominant, (d) => boneControl[d]);
     mesh.castShadow = true;
@@ -381,6 +405,64 @@ export class Figure {
     hull.bind(skeleton, mesh.bindMatrix);
     this.meshes.push(mesh);
     this.skinned.push(mesh, hull);
+    return mesh;
+  }
+
+  /**
+   * The realistic body: morph MakeHuman's mesh to the body sliders, fit our
+   * skeleton to its joints, and bind the skin with the bones posed like the
+   * modelled A-pose. Afterwards the bones return to our rest pose, so every
+   * pose, preset and drag works exactly as on the mannequin.
+   */
+  private buildRealistic(P: Proportions, asset: RealisticAsset) {
+    const pos = morph(asset, P.params);
+    placeMesh(asset, pos, P.H);
+    const J = jointCentres(asset, pos);
+    // Measured joint heights replace the mannequin's estimates; drag handles, the
+    // floor rules and the balance model read them.
+    const mid = (a: THREE.Vector3, b: THREE.Vector3) => (a.y + b.y) / 2;
+    Object.assign(P, {
+      rootY: J.pelvis.y,
+      hipY: mid(J.hip_L, J.hip_R),
+      lumbarY: J.lumbar.y,
+      chestY: J.chest.y,
+      neckY: J.neck.y,
+      headY: J.head.y,
+      shoulderY: mid(J.shoulder_L, J.shoulder_R) + 0.022 * P.H,
+      ankleY: mid(J.ankle_L, J.ankle_R),
+      hipJointHalf: (J.hip_L.x - J.hip_R.x) / 2,
+      ua: J.shoulder_L.distanceTo(J.elbow_L),
+      fa: J.elbow_L.distanceTo(J.wrist_L),
+      thigh: J.hip_L.distanceTo(J.knee_L),
+      shank: J.knee_L.distanceTo(J.ankle_L),
+    });
+
+    const fits = fitSkeleton(J);
+    for (const f of fits) this.bone(f.name, f.parent ? this.bones[f.parent] : this.group, f.offset.x, f.offset.y, f.offset.z, f.rest);
+
+    const n = asset.meta.bodyVertexCount;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos.slice(0, n * 3), 3));
+    geo.setIndex(new THREE.BufferAttribute(asset.indices.slice(), 1));
+    geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(Uint16Array.from(asset.skinIndex.subarray(0, n * 4)), 4));
+    geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(Float32Array.from(asset.skinWeight.subarray(0, n * 4), (w) => w / 255), 4));
+    geo.computeVertexNormals();
+    const dominant = new Uint8Array(n);
+    for (let i = 0; i < n; i++) dominant[i] = asset.skinIndex[i * 4];
+
+    // Bind with the bones posed like the mesh, then return them to rest.
+    for (const f of fits) this.bones[f.name].quaternion.copy(f.bind);
+    this.addSkinned(geo, asset.meta.bones, asset.meta.bones.map(controlOfBone), dominant);
+    for (const f of fits) this.bones[f.name].quaternion.copy(this.rest[f.name]);
+
+    // MakeHuman's eyes are separate meshes; simple eyeballs stand in for them.
+    for (const side of ['L', 'R'] as const) {
+      const eye = eyeball(asset, pos, side);
+      const c = eye.centre.sub(J.head);
+      this.part(this.bones.head, ellipsoid(eye.radius, eye.radius, eye.radius, c.x, c.y, c.z, 20), 'head', false);
+    }
+    this.buildBalanceModel();
+    this.group.updateMatrixWorld(true);
   }
 
   /** Buttocks shaped into the back of the pelvis, with a cleft and a fold underneath. */
@@ -786,10 +868,12 @@ export class Figure {
     const v = new THREE.Vector3();
     const rigid: { mesh: THREE.Mesh; bottom: number }[] = [];
     for (const mesh of this.meshes) {
-      if (only && !only(mesh.userData.control)) continue;
+      const perVertex = mesh.userData.vertexControl as string[] | undefined;
+      if (only && !perVertex && !only(mesh.userData.control)) continue;
       const pos = mesh.geometry.getAttribute('position');
       if (mesh instanceof THREE.SkinnedMesh) {
         for (let i = 0; i < pos.count; i += stride) {
+          if (only && perVertex && !only(perVertex[i])) continue;
           v.fromBufferAttribute(pos, i);
           mesh.applyBoneTransform(i, v);
           v.applyMatrix4(mesh.matrixWorld);

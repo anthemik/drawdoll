@@ -37,6 +37,8 @@ const ARM_FRAC: [number, number][] = [
 
 /** Every dimension the mannequin builder needs, in metres, standing at rest with feet on y = 0. */
 export interface Proportions {
+  /** The slider values these proportions were computed from. */
+  params: FigureParams;
   H: number;
   hh: number;
   headsTall: number;
@@ -117,6 +119,7 @@ export function computeProportions(fp: FigureParams): Proportions {
   const L = hipY - ankleY;
 
   return {
+    params: { ...fp },
     H, hh, headsTall: H / hh, c, p, fem, mas, fat, mu,
 
     headB: hh * (0.65 + 0.07 * c),
