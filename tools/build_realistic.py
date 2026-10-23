@@ -4,14 +4,17 @@ Convert MakeHuman CC0 assets into DrawDoll's compact realistic-body asset.
 Usage:
     python3 -I tools/build_realistic.py <makehuman-data-dir> <output-dir>
 
-<makehuman-data-dir> must contain base.obj, default.mhskel, default_weights.mhw and
-targets/*.target (the macrodetails targets). Writes body.json and body.bin.
+<makehuman-data-dir> must contain base.obj, default.mhskel, default_weights.mhw,
+targets/*.target (the macrodetails targets) and breast/*.target (the female
+breast-size targets). Writes body.json and body.bin.
 
 What is kept:
   - the "body" mesh (triangulated), plus the helper vertices that define joint
     centres and the eyes;
   - the macro shape targets for baby/child/young ages, with the three ethnicity
     targets averaged into one neutral target per sex and age;
+  - the female breast-size targets (smaller/larger cup at average firmness) for
+    child and young ages;
   - skin weights, merged from MakeHuman's 163 bones onto DrawDoll's skeleton.
 Units stay in MakeHuman decimetres; the app scales the result to its own stature.
 """
@@ -122,6 +125,8 @@ def joint_spec(skel):
             for i in range(4):
                 spec[f'f{i}{k}' + s] = head(f'finger{i + 2}-{k + 1}' + mh)
         spec['thumbTip' + s] = tail('finger1-3' + mh)
+        spec['breast' + s] = head('breast' + mh)
+        spec['nipple' + s] = tail('breast' + mh)
         for i in range(4):
             spec[f'f{i}tip' + s] = tail(f'finger{i + 2}-3' + mh)
     return spec
@@ -163,6 +168,12 @@ def main(src, dst):
                     for k in range(3):
                         a[k] += d[k] / len(RACES)
             targets.append((f'race-{sex}-{age}', {i: tuple(v) for i, v in avg.items()}))
+    for age in ('child', 'young'):
+        for m in LEVELS:
+            for w in LEVELS:
+                for cup in ('min', 'max'):
+                    name = f'female-{age}-{m}muscle-{w}weight-{cup}cup-averagefirmness'
+                    targets.append((f'breast-{name}', read_target(os.path.join(src, 'breast', name + '.target'))))
 
     max_delta = max(abs(c) for _, t in targets for d in t.values() for c in d)
     scale = max_delta / 32767

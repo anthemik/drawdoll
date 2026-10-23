@@ -50,7 +50,8 @@ Safari and choose Share → Add to Home Screen; it then runs full screen and wor
 `public/realistic/body.{json,bin}` is generated from MakeHuman's CC0 base mesh, skin weights and
 macro shape targets by `tools/build_realistic.py` (no Blender needed). To regenerate, download
 `makehuman/data/3dobjs/base.obj`, `rigs/default.mhskel`, `rigs/default_weights.mhw` and the
-`targets/macrodetails/*.target` files (baby/child/young) from
+`targets/macrodetails/*.target` files (baby/child/young) into `targets/`, and the
+`targets/breast/female-{child,young}-*-{min,max}cup-averagefirmness.target` files into `breast/`, from
 https://github.com/makehumancommunity/makehuman into a folder laid out the same way, then:
 
 ```bash

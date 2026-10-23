@@ -11,9 +11,11 @@ export interface FigureParams {
   build: number;
   /** 0 = soft, 1 = very muscular. */
   muscle: number;
+  /** Breast size: 0 = smaller, 0.5 = typical for the body, 1 = larger. */
+  breast: number;
 }
 
-export const DEFAULT_PARAMS: FigureParams = { age: 25, sex: 0.5, height: 1, build: 0.3, muscle: 0.3 };
+export const DEFAULT_PARAMS: FigureParams = { age: 25, sex: 0, height: 1, build: 0.3, muscle: 0.3, breast: 0.5 };
 
 // Median stature (m) by age. Roughly CDC/WHO growth-chart medians.
 const HEIGHT_F: [number, number][] = [
@@ -161,7 +163,7 @@ export function computeProportions(fp: FigureParams): Proportions {
     kneeR: H * (0.03 + 0.003 * c) * Math.sqrt(g),
     calfR: H * (0.032 + 0.006 * mu + 0.003 * c) * Math.pow(g, 0.8),
     ankleR: H * (0.018 + 0.002 * c),
-    breast: fem * H * 0.04 * (0.85 + 0.45 * fat),
+    breast: fem * H * 0.04 * (0.85 + 0.45 * fat) * (0.3 + 1.4 * (fp.breast ?? 0.5)),
     pec: clamp(0.4 * mas + 0.8 * mu * p, 0, 1),
   };
 }

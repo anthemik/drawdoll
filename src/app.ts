@@ -99,7 +99,7 @@ interface Settings {
 function defaults(): Settings {
   return {
     params: { ...DEFAULT_PARAMS },
-    bodyStyle: 'mannequin',
+    bodyStyle: 'realistic',
     pose: defaultPose(),
     focal: 50,
     keepFraming: true,
@@ -951,8 +951,14 @@ export class App {
       }
     }
 
-    const presetGrid = h('div', { class: 'chips' });
-    for (const p of PRESETS) presetGrid.append(h('button', { onclick: () => this.loadPose(p.pose) }, p.name));
+    const presetGrid = h('div', { class: 'preset-groups' });
+    for (const category of [...new Set(PRESETS.map((p) => p.category))]) {
+      const chips = h('div', { class: 'chips' });
+      for (const p of PRESETS.filter((x) => x.category === category)) {
+        chips.append(h('button', { onclick: () => this.loadPose(p.pose) }, p.name));
+      }
+      presetGrid.append(h('div', { class: 'preset-label' }, category), chips);
+    }
     const savedList = h('div', { class: 'saved' });
     this.s.saved.forEach((p, i) => {
       savedList.append(
@@ -1179,6 +1185,19 @@ export class App {
           hi: 'Heavy',
           format: pct,
           onInput: change('build'),
+          onCommit: commit,
+        }).el,
+        slider({
+          label: 'Breasts',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          value: p.breast,
+          def: DEFAULT_PARAMS.breast,
+          lo: 'Smaller',
+          hi: 'Larger',
+          format: (v) => (Math.abs(v - 0.5) < 0.02 ? 'Typical' : `${v > 0.5 ? '+' : '−'}${Math.round(Math.abs(v - 0.5) * 200)}%`),
+          onInput: change('breast'),
           onCommit: commit,
         }).el,
         slider({

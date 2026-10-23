@@ -86,6 +86,10 @@ export function targetWeights(fp: FigureParams): Map<string, number> {
   const age = ageWeights(mhAge(fp.age));
   const muscle = levelWeights(mhLevel(fp.muscle));
   const weight = levelWeights(mhLevel(fp.build));
+  // Breast size, like MakeHuman's own slider: blend toward its smaller or larger cup
+  // targets. They exist for female child and young bodies only.
+  const b = clamp(fp.breast ?? 0.5, 0, 1);
+  const cup: Record<string, number> = b < 0.5 ? { min: (0.5 - b) * 2 } : { max: (b - 0.5) * 2 };
   const out = new Map<string, number>();
   for (const [s, ws] of Object.entries(sex)) {
     for (const [a, wa] of Object.entries(age)) {
@@ -95,6 +99,11 @@ export function targetWeights(fp: FigureParams): Map<string, number> {
         for (const [w, ww] of Object.entries(weight)) {
           const k = ws * wa * wm * ww;
           if (k > 0) out.set(`universal-${s}-${a}-${m}muscle-${w}weight`, k);
+          if (s === 'female' && a !== 'baby') {
+            for (const [c, wc] of Object.entries(cup)) {
+              if (k * wc > 0) out.set(`breast-female-${a}-${m}muscle-${w}weight-${c}cup-averagefirmness`, k * wc);
+            }
+          }
         }
       }
     }

@@ -1,5 +1,5 @@
 import { Side } from './figure';
-import { PadKind, clampReach, maxReach } from './joints';
+import { OVERHEAD_CAP, PadKind, clampReach, maxReach } from './joints';
 
 /**
  * Direction pad for ball joints (shoulder, hip). It is a map of every way the
@@ -120,6 +120,15 @@ export class SwingPad {
     g.globalAlpha = 0.6;
     g.stroke();
     g.globalAlpha = 1;
+    // Overhead cap: a ring at the rim that's reachable whichever way the arm leans.
+    const cap = OVERHEAD_CAP[this.kind];
+    if (cap < 180) {
+      g.beginPath();
+      g.arc(cx, cy, R, 0, Math.PI * 2);
+      g.arc(cx, cy, (R * cap) / 180, 0, Math.PI * 2, true);
+      g.fillStyle = region;
+      g.fill('evenodd');
+    }
 
     g.fillStyle = fg;
     g.font = '600 11px system-ui, sans-serif';

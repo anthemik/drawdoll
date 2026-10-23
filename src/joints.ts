@@ -211,18 +211,27 @@ export function maxReach(kind: PadKind, azimuthDeg: number): number {
   return interp(REACH[kind], azimuthDeg);
 }
 
+/**
+ * An arm can point anywhere within ~25° of straight up (overhead), whichever way
+ * it leans; near the top of the pad every direction converges, so this cap is
+ * reachable even where the side table above is tight. Legs have no such cap.
+ */
+export const OVERHEAD_CAP: Record<PadKind, number> = { shoulder: 155, hip: Infinity };
+
 export function insideReach(kind: PadKind, fwd: number, out: number): boolean {
   const e = Math.hypot(fwd, out);
-  return e <= maxReach(kind, Math.atan2(out, fwd) / DEG) + 1e-6;
+  return e <= maxReach(kind, Math.atan2(out, fwd) / DEG) + 1e-6 || e >= OVERHEAD_CAP[kind] - 1e-6;
 }
 
-/** Pull a pad point back onto the reachable region along the line to the centre. */
+/** Pull a pad point onto the nearest reachable elevation along its line from the centre. */
 export function clampReach(kind: PadKind, fwd: number, out: number): [number, number] {
   const e = Math.hypot(fwd, out);
   if (e < 1e-6) return [0, 0];
   const lim = maxReach(kind, Math.atan2(out, fwd) / DEG);
-  if (e <= lim) return [fwd, out];
-  return [(fwd * lim) / e, (out * lim) / e];
+  const cap = OVERHEAD_CAP[kind];
+  if (e <= lim || e >= cap) return [fwd, out];
+  const to = e - lim < cap - e ? lim : cap;
+  return [(fwd * to) / e, (out * to) / e];
 }
 
 /**
