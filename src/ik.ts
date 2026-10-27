@@ -390,6 +390,34 @@ export function withArmsSteady(fig: Figure, pose: Pose, autoGround: boolean, edi
   for (const { side, dir } of steady) aimLimb(fig, pose, 'arm', side, worldPos(fig.bones[limbNames('arm', side).root]).add(dir));
 }
 
+/**
+ * Keep the hips within reach of the planted feet: the hips can't be lifted
+ * higher (or slid further) than the fully straightened legs allow, so the body
+ * can't be pulled off the floor while its feet are planted.
+ */
+export function keepHipsOverFeet(fig: Figure, pose: Pose) {
+  const r = pose.root;
+  const pelvis = worldQuat(fig.bones.pelvis);
+  for (const key of PIN_KEYS) {
+    if (!key.startsWith('pin_leg') || !pose[key]) continue;
+    const side = key.slice(-1);
+    const pin = pose[key];
+    const o = fig.bones[`hip_${side}`].position.clone().applyQuaternion(pelvis);
+    const L = (fig.bones[`knee_${side}`].position.length() + fig.bones[`ankle_${side}`].position.length()) * 0.995;
+    let dx = r.x + o.x - pin.x;
+    let dz = r.z + o.z - pin.z;
+    const flat = Math.hypot(dx, dz);
+    if (flat > L * 0.98) {
+      const k = (L * 0.98) / flat;
+      dx *= k;
+      dz *= k;
+      r.x = pin.x - o.x + dx;
+      r.z = pin.z - o.z + dz;
+    }
+    r.y = Math.min(r.y, pin.y + Math.sqrt(Math.max(0, L * L - dx * dx - dz * dz)) - o.y);
+  }
+}
+
 /** The foot's orientation with toes and sole level, keeping only which way it faces. */
 export function flatFoot(q: THREE.Quaternion) {
   const f = new THREE.Vector3(0, 0, 1).applyQuaternion(q);

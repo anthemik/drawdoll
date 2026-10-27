@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Figure, SIDES, Side } from './figure';
 import { CONTROL_BY_ID, Pose, pinKey } from './joints';
-import { applyPose, makePin } from './ik';
+import { applyPose, keepHipsOverFeet, makePin } from './ik';
 
 // Gravity: after an edit, keep the doll's centre of mass over what it is standing,
 // kneeling or sitting on. Compensation follows the order people use: shift the
@@ -29,6 +29,18 @@ function segmentDistance(p: THREE.Vector2, a: THREE.Vector2, b: THREE.Vector2) {
   const ab = b.clone().sub(a);
   const t = ab.lengthSq() > 0 ? THREE.MathUtils.clamp(p.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1) : 0;
   return a.clone().addScaledVector(ab, t).distanceTo(p);
+}
+
+function nearestOnHull(poly: THREE.Vector2[], p: THREE.Vector2) {
+  let best = poly[0].clone();
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const ab = poly[(i + 1) % poly.length].clone().sub(a);
+    const t = ab.lengthSq() > 0 ? THREE.MathUtils.clamp(p.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1) : 0;
+    const q = a.clone().addScaledVector(ab, t);
+    if (q.distanceTo(p) < best.distanceTo(p)) best = q;
+  }
+  return best;
 }
 
 /** Distance from a point to a convex polygon: negative inside (depth), positive outside. */
@@ -84,6 +96,7 @@ export function findBalance(fig: Figure, pose: Pose, autoGround: boolean, edited
   const margin = 0.012 * H;
   applyPose(fig, pose, autoGround, false);
   const start = measureBalance(fig);
+  // An airborne pose (a jump, levitation) is left as posed.
   if (!start.grounded || start.support.length === 0 || start.outside <= 0) return null;
 
   let work = clone(pose);
@@ -238,24 +251,31 @@ export function findBalance(fig: Figure, pose: Pose, autoGround: boolean, edited
   };
   let m = correct(6);
 
-  // Step: bring the trailing planted foot through to just beyond the centre of
-  // mass in the direction of the fall (a stride of at most ~45% of height). Only
-  // with both feet down: on one leg, moving the standing foot would be a hop.
+  // Step: one foot steps to just beyond the centre of mass in the direction of
+  // the fall (a stride of at most ~45% of height). Each foot keeps to its own
+  // side, so a sideways fall is caught by the leading foot stepping out rather
+  // than the legs crossing; the shorter of the two strides wins. Only with both
+  // feet down: on one leg, moving the standing foot would be a hop.
   if (m.outside > -margin && tempPins.length === 2) {
     const fall = m.com.clone().sub(centroid(m.support)).normalize();
-    const trailing = tempPins
-      .map((key) => ({ key, along: new THREE.Vector2(work[key].x, work[key].z).sub(m.com).dot(fall) }))
-      .sort((p, q) => p.along - q.along)[0];
-    if (trailing) {
-      const pin = work[trailing.key];
-      const from = new THREE.Vector2(pin.x, pin.z);
+    const lat3 = new THREE.Vector3(1, 0, 0).applyQuaternion(fig.bones.pelvis.getWorldQuaternion(new THREE.Quaternion()));
+    const lat = new THREE.Vector2(lat3.x, lat3.z).normalize();
+    const steps = tempPins.map((key) => {
+      const other = work[tempPins.find((k) => k !== key)!];
+      const from = new THREE.Vector2(work[key].x, work[key].z);
       const to = m.com.clone().addScaledVector(fall, 0.05 * H);
-      const stride = to.clone().sub(from);
+      const side = key.endsWith('L') ? 1 : -1;
+      const apart = to.clone().sub(new THREE.Vector2(other.x, other.z)).dot(lat) * side;
+      if (apart < 0.08 * H) to.addScaledVector(lat, (0.08 * H - apart) * side);
+      const stride = to.sub(from);
       if (stride.length() > 0.45 * H) stride.setLength(0.45 * H);
-      pin.x = from.x + stride.x;
-      pin.z = from.y + stride.y;
-      m = correct(3);
-    }
+      return { key, from, stride };
+    });
+    const step = steps.sort((p, q) => p.stride.length() - q.stride.length())[0];
+    const pin = work[step.key];
+    pin.x = step.from.x + step.stride.x;
+    pin.z = step.from.y + step.stride.y;
+    m = correct(3);
   }
 
   // Settle onto the floor with the feet still planted, then release them.
@@ -265,6 +285,48 @@ export function findBalance(fig: Figure, pose: Pose, autoGround: boolean, edited
   if (!wasFixed) work.root.fixed = 0;
   applyPose(fig, work, autoGround);
   return work;
+}
+
+/**
+ * Move the hips (the pose's fixed root) so the weight is over what's on the floor:
+ * `onto` puts the weight over that foot (it must be on the floor); without
+ * it the hips move only as far as needed to bring the weight inside the support.
+ * Planted feet must be pinned so they stay put. Leaves the figure posed.
+ */
+export function shiftWeight(fig: Figure, pose: Pose, onto?: Side) {
+  const H = fig.P.H;
+  const margin = 0.02 * H;
+  for (let i = 0; i < 6; i++) {
+    keepHipsOverFeet(fig, pose);
+    applyPose(fig, pose, false, false);
+    const { com: c3 } = fig.balance(0, 0);
+    const com = new THREE.Vector2(c3.x, c3.z);
+    let need: THREE.Vector2;
+    if (onto) {
+      // Over the foot's midline, a little ahead of the ankle, as people balance on
+      // one leg: weight already in that range stays where it is fore and aft.
+      const ankle = fig.bones[`ankle_${onto}`];
+      const a3 = ankle.getWorldPosition(new THREE.Vector3());
+      const f3 = new THREE.Vector3(0, 0, 1).applyQuaternion(ankle.getWorldQuaternion(new THREE.Quaternion()));
+      const a = new THREE.Vector2(a3.x, a3.z);
+      const fwd = new THREE.Vector2(f3.x, f3.z).normalize();
+      const along = THREE.MathUtils.clamp(com.clone().sub(a).dot(fwd), 0.01 * H, 0.05 * H);
+      need = a.addScaledVector(fwd, along).sub(com);
+      if (need.length() < 0.003 * H) break;
+    } else {
+      const touching = fig.floorContacts(0.012 * H, 7);
+      if (touching.length === 0) break;
+      const support = hull(touching);
+      if (signedDistance(support, com) <= -margin * 0.5) break;
+      // The shortest way in: to the nearest edge of the support, then a margin inside.
+      const edge = nearestOnHull(support, com);
+      need = edge.clone().sub(com).add(centroid(support).sub(edge).setLength(margin));
+    }
+    pose.root.x += need.x;
+    pose.root.z += need.y;
+  }
+  keepHipsOverFeet(fig, pose);
+  applyPose(fig, pose, false, false);
 }
 
 /** Is this foot resting on the floor (a contact point near it within a couple of cm)? */

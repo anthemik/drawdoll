@@ -122,6 +122,8 @@ export class Viewer {
   updateProjection() {
     const vw = this.container.clientWidth;
     const vh = this.container.clientHeight;
+    // A hidden or collapsed viewport has no size; keep the last good projection.
+    if (vw === 0 || vh === 0) return;
     const ea = this.frame.w / this.frame.h;
     const m = Math.max(12, Math.min(vw, vh) * 0.04);
     const aw = vw - 2 * m;

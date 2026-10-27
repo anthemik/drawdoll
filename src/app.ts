@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { Figure, RenderStyle, Side } from './figure';
 import { loadRealisticAsset } from './realistic';
-import { blendPose, findBalance, measureBalance } from './gravity';
+import { blendPose, findBalance, measureBalance, shiftWeight } from './gravity';
 import { DEFAULT_PARAMS, FigureParams, computeProportions, describeHeight } from './proportions';
 import {
   CONTROLS,
@@ -26,6 +26,7 @@ import {
   flatFoot,
   getSwivel,
   headHandleLocal,
+  keepHipsOverFeet,
   lookAt,
   makePin,
   setSwivel,
@@ -202,6 +203,12 @@ interface Drag {
   rootWasFixed: boolean;
   /** Elbow/knee drag on a pinned limb: steer the bend instead of swinging the limb. */
   steer: boolean;
+  /** Dragging the only foot on the floor with gravity on: it stays on the floor. */
+  onlySupport: boolean;
+  /** Leg drag under gravity: the hips keep the weight over the feet on the floor. */
+  shiftsWeight: boolean;
+  /** Where the hips were when the drag began; the weight shift is measured from here. */
+  rootStart: { x: number; z: number };
 }
 
 export class App {
@@ -600,12 +607,26 @@ export class App {
           tempPins.push(key);
         };
         let steer = false;
+        let onlySupport = false;
+        let shiftsWeight = false;
         if (handle.kind === 'end') pinTemp(handle.limb!, handle.side!);
         else if (handle.kind === 'mid') steer = this.isPinned(handle.limb!, handle.side!);
         if (handle.limb === 'leg' && (handle.kind === 'end' || handle.kind === 'mid')) {
           // Keep the standing leg planted while the other one moves.
           const other: Side = handle.side === 'L' ? 'R' : 'L';
-          if (this.footGrounded(other)) pinTemp('leg', other);
+          const otherDown = this.footGrounded(other);
+          if (otherDown) pinTemp('leg', other);
+          // Under gravity, lifting this leg moves the weight onto the other one as you drag.
+          shiftsWeight = this.s.gravity && otherDown;
+          // Under gravity the last foot on the floor can't leave it: the foot can
+          // only slide, and its knee steers instead of lifting the leg.
+          if (this.s.gravity && !otherDown && this.footGrounded(handle.side!)) {
+            onlySupport = true;
+            if (handle.kind === 'mid') {
+              pinTemp('leg', handle.side!);
+              steer = true;
+            }
+          }
         }
         else if (handle.kind === 'hips') {
           for (const side of ['L', 'R'] as Side[]) if (this.footGrounded(side)) pinTemp('leg', side);
@@ -624,6 +645,9 @@ export class App {
           tempPins,
           rootWasFixed,
           steer,
+          onlySupport,
+          shiftsWeight,
+          rootStart: { x: pose.root.x, z: pose.root.z },
         };
         this.updateHandles();
         this.viewer.invalidate();
@@ -643,6 +667,7 @@ export class App {
       switch (hd.kind) {
         case 'end': {
           const pin = pose[pinKey(hd.limb!, hd.side!)];
+          if (d.onlySupport) target.y = this.figure.P.ankleY;
           this.floorTarget(hd, target, pin);
           Object.assign(pin, { x: target.x, y: target.y, z: target.z });
           if (hd.limb === 'arm' && this.s.autoGround) {
@@ -660,7 +685,8 @@ export class App {
           break;
         case 'hips':
           target.y -= (pose.body.lift ?? 0) * this.figure.P.H;
-          Object.assign(pose.root, { x: target.x, y: target.y, z: target.z });
+          if (this.s.gravity) this.moveHipsBalanced(target);
+          else Object.assign(pose.root, { x: target.x, y: target.y, z: target.z });
           break;
         case 'chest':
           withArmsSteady(this.figure, pose, this.s.autoGround, () => aimChest(this.figure, pose, target));
@@ -669,6 +695,12 @@ export class App {
           aimHead(this.figure, pose, target);
           break;
       }
+      if (d.shiftsWeight) {
+        // From where the hips started, so putting the foot back down shifts them back.
+        pose.root.x = d.rootStart.x;
+        pose.root.z = d.rootStart.z;
+        shiftWeight(this.figure, pose);
+      }
       this.poseChanged();
     });
     const end = (e: PointerEvent) => {
@@ -676,13 +708,13 @@ export class App {
       if (!d || e.pointerId !== d.pointerId) return;
       this.drag = null;
       const pose = this.s.pose;
-      for (const key of d.tempPins) delete pose[key];
       if (d.steer) {
         const pin = pose[pinKey(d.handle.limb!, d.handle.side!)];
         delete pin.px;
         delete pin.py;
         delete pin.pz;
       }
+      for (const key of d.tempPins) delete pose[key];
       if (!d.rootWasFixed) pose.root.fixed = 0;
       this.syncRoot();
       this.poseChanged();
@@ -697,7 +729,82 @@ export class App {
     viewport.addEventListener('pointercancel', end);
   }
 
+  /**
+   * Hips drag under gravity: the hips stay within reach of the planted feet, and
+   * the weight can shift over the feet but not past them, so the hips stop at the
+   * edge of balance instead of tipping the doll over.
+   */
+  private moveHipsBalanced(target: THREE.Vector3) {
+    const fig = this.figure;
+    const pose = this.s.pose;
+    const from = { x: pose.root.x, y: pose.root.y, z: pose.root.z };
+    const at = (k: number) => {
+      pose.root.x = from.x + (target.x - from.x) * k;
+      pose.root.y = from.y + (target.y - from.y) * k;
+      pose.root.z = from.z + (target.z - from.z) * k;
+      keepHipsOverFeet(fig, pose);
+      applyPose(fig, pose, this.s.autoGround, false);
+      return measureBalance(fig).outside;
+    };
+    const was = at(0);
+    if (at(1) <= Math.max(0, was)) return;
+    let lo = 0;
+    let hi = 1;
+    for (let i = 0; i < 7; i++) {
+      const mid = (lo + hi) / 2;
+      if (at(mid) <= Math.max(0, was)) lo = mid;
+      else hi = mid;
+    }
+    at(lo);
+  }
+
   // ---------------------------------------------------------------- actions
+
+  /**
+   * Stand on one leg: the hips shift until the weight is centred over that foot,
+   * and the other foot comes off the floor a little, ready to be posed. A lifted
+   * standing foot is first put down flat where it is.
+   */
+  standOn(side: Side) {
+    const fig = this.figure;
+    const pose = this.s.pose;
+    const H = fig.P.H;
+    const other: Side = side === 'L' ? 'R' : 'L';
+    if (!this.footGrounded(side) && !this.footGrounded(other)) return;
+    const rootWasFixed = !!pose.root.fixed;
+    if (!rootWasFixed) this.fixRoot();
+    const temp: string[] = [];
+    for (const s of [side, other]) {
+      const key = pinKey('leg', s);
+      if (!pose[key]) {
+        pose[key] = makePin(fig, 'leg', s);
+        temp.push(key);
+      }
+    }
+    const stand = pose[pinKey('leg', side)];
+    if (!this.footGrounded(side)) {
+      const q = flatFoot(new THREE.Quaternion(stand.qx, stand.qy, stand.qz, stand.qw));
+      Object.assign(stand, { y: fig.P.ankleY, qx: q.x, qy: q.y, qz: q.z, qw: q.w });
+    }
+    shiftWeight(fig, pose, side);
+    // The free foot rises a hand's width, slightly behind, as people do.
+    const free = pose[pinKey('leg', other)];
+    if (free.y < fig.P.ankleY + 0.04 * H) {
+      const back = new THREE.Vector3(0, 0, -1).applyQuaternion(fig.bones.pelvis.getWorldQuaternion(new THREE.Quaternion()));
+      free.y = fig.P.ankleY + 0.06 * H;
+      free.x += back.x * 0.03 * H;
+      free.z += back.z * 0.03 * H;
+    }
+    shiftWeight(fig, pose, side);
+    this.poseChanged();
+    for (const key of temp) delete pose[key];
+    if (!rootWasFixed) pose.root.fixed = 0;
+    this.syncRoot();
+    this.poseChanged();
+    this.lastEdited = null;
+    this.commit();
+    if (this.tab === 'pose') this.renderTab();
+  }
 
   select(id: string | null) {
     this.selected = id;
@@ -916,6 +1023,14 @@ export class App {
         ),
       );
     }
+    out.push(
+      h(
+        'div',
+        { class: 'part-actions' },
+        h('button', { title: 'Weight onto the doll’s left foot; the right foot lifts', onclick: () => this.standOn('L') }, 'Stand on left'),
+        h('button', { title: 'Weight onto the doll’s right foot; the left foot lifts', onclick: () => this.standOn('R') }, 'Stand on right'),
+      ),
+    );
     out.push(this.partPicker());
     const id = this.selected;
     if (!id) {
@@ -991,11 +1106,13 @@ export class App {
         requestAnimationFrame(() => pad!.set(values.fwd, values.out));
       }
       for (const dof of c.dofs) {
-        if (dof.id === 'lift' && !this.s.autoGround) continue;
+        // Under gravity the body can't be raised off the floor, only lowered from a jump.
+        const noRaise = dof.id === 'lift' && this.s.gravity;
+        if (dof.id === 'lift' && (!this.s.autoGround || (noRaise && !(values.lift > 0)))) continue;
         const sl = slider({
           label: dof.label,
           min: dof.min,
-          max: dof.max,
+          max: noRaise ? values.lift : dof.max,
           step: dof.unit === 'len' ? 0.005 : 1,
           value: values[dof.id],
           def: dof.def,
